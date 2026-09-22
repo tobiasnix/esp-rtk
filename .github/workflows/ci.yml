@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Install host-tool dependencies
+        run: python3 -m pip install -r requirements.txt
+      - name: Unit tests, language gate, and repository checks
+        shell: bash
+        run: |
+          set +e
+          python3 -m unittest discover -s tests > unittest.log 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::group::Relevant unittest tracebacks"
+            grep -n -E -A 28 -B 3 '^(ERROR|FAIL):' unittest.log || true
+            echo "::endgroup::"
+            echo "::group::Unittest summary and final output"
+            tail -n 100 unittest.log
+            echo "::endgroup::"
+            exit "$status"
+          fi
+          grep -E '^Ran |^OK$' unittest.log
+      - name: Compile Python
+        run: python3 -m compileall -q .
+      - name: Check JavaScript syntax
+        run: |
+          for file in *.js tests/*.js; do
+            node --check "$file"
+          done
+      - name: Check repository hygiene
+        run: |
+          test -f LICENSE
+          test ! -e config.json
+          test ! -e backup
+          test ! -e docs/internal || test -f tools/export_public.py
+          git diff --check
+      - name: Scan committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

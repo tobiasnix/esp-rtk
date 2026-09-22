@@ -1,0 +1,47 @@
+ESP32_GENERIC_S3-*.bin
+backup/
+__pycache__/
+*.pyc
+# Credentials live on the board, not in the repository.
+config.json
+config.json.tmp
+config.json.previous
+config.pending.json
+config.pending.json.tmp
+config.pending.json.previous
+config.last_good.json
+config.last_good.json.tmp
+config.last_good.json.previous
+identity.json
+identity.json.tmp
+*.log
+*.log.*
+# Board runtime state, not source code.
+bootcount.json
+planned.reset
+tracking.jsonl.tmp
+tracking.jsonl.previous
+tracking.jsonl
+tracking.index.json
+tracking.index.json.tmp
+tracking.index.json.previous
+tracking.checkpoint.json
+tracking.checkpoint.json.tmp
+tracking.checkpoint.json.previous
+tracking.segment-*.jsonl
+tracking.segment-*.corrupt
+tracking.segment-*.oversize
+survey-export-*
+*.ndjson.tmp
+ble-bonds.json
+ble-bonds.tmp
+ble-bonds.previous
+.v11-english-history-migrated
+
+# Optional on-device field log.
+field-diagnostics-*.jsonl
+field-diagnostics.state
+field-diagnostics.state.tmp
+
+# Local device captures and diagnostic runs; kept out of the repository.
+artifacts/diagnostics/

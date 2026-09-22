@@ -1,0 +1,2 @@
+# Host-side upload, download, monitoring, and raw-REPL tools.
+pyserial>=3.5,<4

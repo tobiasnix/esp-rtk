@@ -1,0 +1,167 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Shared design system for every page of the device portal.
+   Page-specific rules live in dashboard.css and pages.css; every value they
+   use must come from a token defined here, so the two cannot drift apart. */
+:root{
+  --bg:#f3f5f8;--surface:#fff;--surface-sunken:#eef1f5;
+  --border:#d7dce3;--text:#172033;--muted:#5e6978;
+  --ok:#16733a;--warn:#9a6700;--critical:#b42318;--accent:#075fb8;--on-accent:#fff;
+  --ok-bg:#ecfdf3;--warn-bg:#fdf6e3;--critical-bg:#fdf1f0;--accent-bg:#e8f1fb;
+  --console-bg:#11161d;--console-text:#d6deeb;
+  --console-header:#27313d;--console-header-text:#d6deeb;
+  --console-border:#202a35;--console-muted:#9fb0c3;
+  --console-ok:#7ee2a8;--console-warn:#ffd166;--console-critical:#ff7b72;--console-debug:#8b949e;
+  --focus:#ffbf47;--backdrop:#17202acc;
+  --radius-sm:6px;--radius:10px;--radius-lg:14px;
+  --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:24px;--space-6:32px;
+  --tap:46px;--content-max:1100px;
+  --shadow:0 1px 3px #17203312;--shadow-lg:0 16px 48px #00000055;
+  --nav-shadow:0 -4px 20px #17203314;--device-gradient:#15447a;--on-device:#fff;--on-device-muted:#ffffffaa;
+  --text-xs:12px;--text-sm:13px;--text-md:14px;--text-base:15px;
+  --text-lg:18px;--text-xl:22px;--text-2xl:24px;--text-3xl:30px;
+  --font:system-ui,sans-serif;--font-mono:ui-monospace,monospace;
+}
+/* Explicit outdoor theme. It is chosen by the user and persisted, never
+   derived from the operating system, so both pages always match. */
+:root[data-theme="high-contrast"]{
+  --bg:#fff;--surface:#fff;--surface-sunken:#fff;
+  --border:#000;--text:#000;--muted:#111;
+  --ok:#006b24;--warn:#7a4900;--critical:#a00000;--accent:#003f9e;
+  --ok-bg:#fff;--warn-bg:#fff;--critical-bg:#fff;--accent-bg:#fff;
+  --console-bg:#fff;--console-text:#000;
+  --console-header:#000;--console-header-text:#fff;
+  --console-border:#000;--console-muted:#111;
+  --console-ok:#006b24;--console-warn:#7a4900;--console-critical:#a00000;--console-debug:#111;
+  --shadow:none;--shadow-lg:0 0 0 2px #000;--backdrop:#000000cc;
+}
+
+*{box-sizing:border-box}
+.sr-only{position:absolute!important;width:1px!important;height:1px!important;padding:0!important;margin:-1px!important;overflow:hidden!important;clip:rect(0,0,0,0)!important;white-space:nowrap!important;border:0!important}
+body{margin:0;font:var(--text-base)/1.5 var(--font);background:var(--bg);color:var(--text)}
+a{color:var(--accent)}
+h1{font-size:var(--text-xl);margin:0 0 var(--space-3)}
+h2{font-size:var(--text-lg);margin:0 0 var(--space-2)}
+
+/* --- Controls ------------------------------------------------------------ */
+button,input,select,textarea{font:inherit;min-height:var(--tap);
+  padding:var(--space-2) var(--space-3);
+  border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--surface);color:var(--text)}
+input[type=checkbox],input[type=radio]{width:22px;height:22px;min-height:0;
+  padding:0;border:0;margin:0;accent-color:var(--accent)}
+/* The label carries the touch target so the box itself stays a box. */
+.checkbox-field{display:inline-flex;align-items:center;gap:var(--space-2);
+  min-height:var(--tap);padding:0 var(--space-1);cursor:pointer}
+button{cursor:pointer;font-weight:600}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{cursor:not-allowed;opacity:.58}
+:root[data-theme="high-contrast"] button:disabled{opacity:1;color:#555;border:3px dashed #555;
+  background:repeating-linear-gradient(135deg,#fff 0,#fff 6px,#ddd 6px,#ddd 9px)}
+.primary{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.primary:hover:not(:disabled){border-color:var(--text)}
+.danger{background:var(--critical);color:var(--on-accent);border-color:var(--critical)}
+input[type=submit]{font-weight:600}
+textarea{resize:vertical;font-family:var(--font-mono);font-size:var(--text-sm)}
+
+/* --- Shell --------------------------------------------------------------- */
+.language-selector{display:flex;justify-content:flex-end;align-items:center;gap:var(--space-3);
+  padding:var(--space-1) var(--space-4);background:var(--surface);color:var(--text)}
+.language-selector button{padding:var(--space-2) var(--space-3)}
+:root[data-theme="high-contrast"] .language-selector [data-theme-toggle]{background:#000;color:#fff}
+.product-header{background:var(--surface);border-bottom:1px solid var(--border);
+  padding:var(--space-3) var(--space-4);display:flex;align-items:center;
+  justify-content:space-between;gap:var(--space-4);flex-wrap:wrap;box-shadow:var(--shadow)}
+.product-identity{display:flex;align-items:baseline;gap:var(--space-2);flex-wrap:wrap}
+.product-actions{display:flex;align-items:center;justify-content:flex-end;gap:var(--space-2);flex-wrap:wrap}
+.product-name{font-size:var(--text-lg);font-weight:600;letter-spacing:-.01em}
+.product-header span{color:var(--muted);font-size:var(--text-sm)}
+.device-status-bar{background:var(--surface);border-bottom:1px solid var(--border);
+  padding:var(--space-1) var(--space-4);font-size:var(--text-xs);color:var(--muted);
+  display:flex;gap:var(--space-1) var(--space-5);flex-wrap:wrap;
+  font-variant-numeric:tabular-nums}
+.device-status-bar b{color:var(--text);font-weight:600}
+.device-status-bar .warn{color:var(--warn)}
+.device-status-bar .critical{color:var(--critical)}
+
+/* One navigation idiom for the whole portal: pills that mark the current
+   place, whether they are links between pages or tabs within one page. */
+.product-nav{display:flex;align-items:center;gap:var(--space-1);flex-wrap:wrap}
+.product-nav a,.product-nav button{display:inline-flex;align-items:center;min-height:var(--tap);
+  padding:var(--space-2) var(--space-3);border:1px solid transparent;border-radius:var(--radius-sm);
+  background:none;text-decoration:none;font-weight:600;color:var(--text)}
+.product-nav a:hover,.product-nav button:hover:not(:disabled){border-color:var(--border)}
+.product-nav [aria-current="page"],.product-nav [aria-selected="true"]{
+  background:var(--accent-bg);border-color:var(--border);color:var(--text)}
+:root[data-theme="high-contrast"] .product-nav [aria-current="page"],
+:root[data-theme="high-contrast"] .product-nav [aria-selected="true"]{
+  background:#000;color:#fff;border-color:#000}
+.app-navigation{width:min(calc(100% - var(--space-6)),var(--content-max));
+  margin:0 auto;padding:var(--space-3) 0 var(--space-2);background:var(--bg)}
+
+/* --- Surfaces ------------------------------------------------------------ */
+.page-content{width:min(calc(100% - var(--space-6)),var(--content-max));
+  margin:var(--space-5) auto var(--space-6)}
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:var(--space-4);box-shadow:var(--shadow)}
+.card{border:1px solid var(--border);border-radius:var(--radius);padding:var(--space-4);
+  background:var(--surface);box-shadow:var(--shadow)}
+.card h2{font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.04em;
+  color:var(--muted);margin:0 0 var(--space-1);font-weight:600}
+.card-grid{display:grid;gap:var(--space-3);grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.section-heading{font-size:var(--text-sm);text-transform:uppercase;letter-spacing:.04em;
+  color:var(--muted);margin:var(--space-5) 0 var(--space-2);font-weight:600}
+
+/* --- Text and status ----------------------------------------------------- */
+.metric-value{font-size:var(--text-2xl);font-weight:600;line-height:1.2}
+.value-compact{font-size:var(--text-base);font-weight:600;line-height:1.4}
+.muted{font-size:var(--text-sm);color:var(--muted)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.critical{color:var(--critical)}
+.notice{border-left:3px solid var(--border);background:var(--surface-sunken);
+  padding:var(--space-3);border-radius:0 var(--radius-sm) var(--radius-sm) 0;
+  margin:var(--space-3) 0;font-size:var(--text-md)}
+.notice.ok{border-color:var(--ok);background:var(--ok-bg);color:inherit}
+.notice.warn{border-color:var(--warn);background:var(--warn-bg);color:inherit}
+.notice.critical{border-color:var(--critical);background:var(--critical-bg);color:inherit}
+:root[data-theme="high-contrast"] .notice{border:2px solid #000;border-left-width:6px;background:#fff}
+
+/* --- Tables -------------------------------------------------------------- */
+table{border-collapse:collapse;width:100%;font-size:var(--text-md)}
+th,td{text-align:left;padding:var(--space-1) var(--space-2);border-bottom:1px solid var(--border)}
+th{color:var(--muted);font-weight:600;font-size:var(--text-xs);text-transform:uppercase}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+
+/* --- Console surfaces ---------------------------------------------------- */
+/* Machine output shares one skin so it stays readable in the outdoor theme,
+   where a fixed dark panel would be unreadable. */
+pre{background:var(--console-bg);color:var(--console-text);padding:var(--space-3);
+  border:1px solid var(--console-border);border-radius:var(--radius-sm);
+  overflow:auto;font-size:var(--text-xs);line-height:1.45;max-height:70vh}
+code{font-family:var(--font-mono);overflow-wrap:anywhere}
+
+:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+@media(prefers-contrast:more){:root{--border:#59636f;--muted:#424b55}
+  .card,.panel,.group{border-width:2px}}
+@media(forced-colors:active){button,.card,.panel,.group,.notice{border:1px solid ButtonText}}
+@media(max-width:600px){
+  .product-header,.product-actions{align-items:stretch}
+  .product-actions{width:100%;justify-content:space-between}
+  /* Keep every destination visible on touch devices. A horizontal strip hid
+     destinations beyond the viewport and gave no reliable scroll affordance. */
+  .product-nav{width:100%;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:var(--space-1);overflow:visible}
+  .product-nav a,.product-nav button{min-width:0;justify-content:center;text-align:center;
+    white-space:normal;line-height:1.2;padding:var(--space-2);overflow-wrap:anywhere}
+  /* A single link beside the header actions must not claim a whole row. */
+  .product-actions .product-nav{width:auto;display:flex}
+  .app-navigation{padding:var(--space-2) var(--space-4);background:var(--surface);
+    border-bottom:1px solid var(--border)}
+  .device-status-bar{gap:var(--space-1) var(--space-3)}
+  .page-content{width:100%;margin:0 0 var(--space-5)}
+  .page-content.panel{border-left:0;border-right:0;border-radius:0}
+  .card-grid{grid-template-columns:1fr}
+}
+.notice:empty{display:none}
+@media(max-width:380px){
+  .product-nav{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .product-actions .product-nav{display:flex}
+}

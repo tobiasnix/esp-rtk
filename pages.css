@@ -1,0 +1,76 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+/* Rules for the server-rendered pages (setup, login, label, diagnostics).
+   Shared tokens and components come from base.css. */
+.page-setup,.page-login,.page-label,.page-diagnostics{min-height:100vh}
+
+/* --- Setup --------------------------------------------------------------- */
+/* The form sets the column width, so heading and footnote align with it. */
+.page-setup .page-content{--content-max:1040px}
+.page-setup h3{font-size:var(--text-xs);text-transform:uppercase;letter-spacing:.04em;
+  color:var(--muted);margin:0 0 var(--space-2);font-weight:600}
+.group{border:1px solid var(--border);border-radius:var(--radius);
+  padding:var(--space-4);margin-bottom:var(--space-4);background:var(--surface);box-shadow:var(--shadow)}
+.group p{margin:0 0 var(--space-2);font-size:var(--text-sm);color:var(--muted)}
+.page-setup label{display:block;margin-top:var(--space-3);font-size:var(--text-sm);color:var(--muted)}
+.page-setup input[type=text],.page-setup input[type=password],
+.page-setup input[type=number],.page-setup textarea{width:100%;margin-top:var(--space-1)}
+.page-setup textarea{min-height:70px}
+.page-setup input[type=submit]{width:100%;margin-top:var(--space-4)}
+.secret-row{display:flex;gap:var(--space-2);align-items:center;margin-top:var(--space-1)}
+.secret-row input{margin-top:0!important;flex:1;font-family:var(--font-mono)}
+.secret-row button{flex:0 0 auto}
+.network-help{margin-top:var(--space-2)!important}
+.setup-hotspot{text-align:center;margin-top:var(--space-5);font-size:var(--text-sm);color:var(--muted)}
+
+/* --- Diagnostics --------------------------------------------------------- */
+.diagnostics-actions{display:flex;align-items:center;gap:var(--space-3);
+  flex-wrap:wrap;margin-bottom:var(--space-3)}
+
+/* --- Login --------------------------------------------------------------- */
+.page-login{font-size:16px;display:grid;grid-template-rows:auto 1fr;background:linear-gradient(180deg,var(--accent-bg),var(--bg) 45%)}
+.login-brand{justify-content:center}
+.login-card{align-self:start;width:min(calc(100% - var(--space-6)),440px);margin:clamp(var(--space-6),10vh,96px) auto;
+  padding:var(--space-6);border-radius:var(--radius-lg)}
+.login-card h1{font-size:var(--text-2xl)}.login-card>p{color:var(--muted)}
+.login-row{display:flex;gap:var(--space-2)}
+.login-row button{flex:0 0 auto}
+.login-code{width:100%}
+.login-submit{width:100%;min-height:56px;margin-top:var(--space-3);font-size:var(--text-lg)}
+
+/* --- Label --------------------------------------------------------------- */
+.codes{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:var(--space-5)}
+.page-label .card{text-align:center}
+.qr svg{width:min(100%,320px);height:auto}
+.qr-payload{overflow-wrap:anywhere;font:var(--text-xs) var(--font-mono);color:var(--muted)}
+.pairing-pin{font:700 var(--text-3xl) var(--font-mono);letter-spacing:.15em}
+
+@media(max-width:600px){
+  .page-setup,.page-label,.page-diagnostics{padding-bottom:76px}
+  .page-setup .app-navigation,.page-label .app-navigation,.page-diagnostics .app-navigation{
+    position:fixed;z-index:30;left:0;right:0;bottom:0;display:grid;grid-template-columns:repeat(3,1fr);
+    width:100%;margin:0;padding:var(--space-2) var(--space-4) calc(var(--space-2) + env(safe-area-inset-bottom));
+    background:var(--surface);border-top:1px solid var(--border);box-shadow:var(--nav-shadow)}
+  .page-setup .app-navigation>a:nth-child(n+4),.page-label .app-navigation>a:nth-child(n+4),
+  .page-diagnostics .app-navigation>a:nth-child(n+4){display:none}
+  .page-setup .app-navigation .portal-parent,.page-label .app-navigation .portal-parent,
+  .page-diagnostics .app-navigation .portal-parent{background:var(--accent-bg);border-color:var(--border);color:var(--accent)}
+  .page-login{background:var(--surface)}
+  .login-card{width:100%;margin:0;border:0;border-radius:0;box-shadow:none;padding:var(--space-5) var(--space-4)}
+  .setup-form{border-left:0;border-right:0;border-radius:0}
+  .page-diagnostics .page-content{border-left:0;border-right:0;border-radius:0}
+  .secret-row,.login-row{align-items:stretch}
+}
+@media(min-width:900px){
+  .page-setup .setup-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--space-4);align-items:start}
+  .page-setup .setup-form>.group{height:100%;margin:0}
+  .page-setup .setup-form>input[type=submit],.page-setup .setup-form>#save-status{grid-column:1/-1}
+  .page-diagnostics .page-content,.page-label .page-content{width:min(calc(100% - var(--space-6)),var(--content-max))}
+}
+@media print{.page-label .product-nav,.page-label .language-selector{display:none}
+  .page-label .card{break-inside:avoid}}
+.confirm-dialog{width:min(460px,calc(100vw - 2rem));max-width:calc(100vw - 2rem);
+  border:1px solid var(--border);border-radius:var(--radius);padding:0;background:var(--surface);
+  color:var(--text);box-shadow:var(--shadow-lg)}
+.confirm-dialog::backdrop{background:var(--backdrop)}
+.confirm-dialog form{display:grid;gap:var(--space-3);padding:var(--space-4)}
+.confirm-dialog p{margin:0}.confirm-dialog .survey-actions{display:flex;gap:var(--space-2);justify-content:flex-end}

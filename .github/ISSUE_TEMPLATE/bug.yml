@@ -1,0 +1,53 @@
+name: Bug report
+description: Report unexpected behaviour of the firmware or the web portal.
+labels: ["bug"]
+body:
+  - type: input
+    id: firmware-version
+    attributes:
+      label: Firmware version
+      description: Shown on the device status page, for example "ESP-RTK V15.8.0".
+      placeholder: ESP-RTK V15.8.0
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Board and GNSS receiver, and anything non-standard about the wiring or power supply.
+      placeholder: ESP32-S3 + Quectel LC29H(DA)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What did you do, in order, starting from a known state?
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include any relevant text from the status page or the device log, with secrets removed.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: >-
+            I removed Wi-Fi names, passwords, device codes, NTRIP credentials
+            and real coordinates from everything in this report.
+          required: true
