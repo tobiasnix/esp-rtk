@@ -33,7 +33,7 @@ let sampleCount=localStorage.getItem("rtk-samples")||"5";sampleCount=sampleCount
 const sampleLabel=count=>count==="quality"?localText("Until quality is OK"):count===1?tr("ui.sample_single","Instant measurement"):tr("ui.sample_avg",`${count}-sample average`,{count});
 let keepAwake=localStorage.getItem("rtk-keep-awake")==="true",wakeLock=null;async function syncWakeLock(){if(wakeLock&&!keepAwake){await wakeLock.release().catch(()=>{});wakeLock=null;}if(keepAwake&&!document.hidden&&navigator.wakeLock&&!wakeLock){try{wakeLock=await navigator.wakeLock.request("screen");wakeLock.addEventListener("release",()=>{wakeLock=null;});}catch(_){wakeLock=null;}}}
 
-const store={state:{live:null,tracking:null,status:null,route:null},listeners:new Set(),set(patch){Object.assign(this.state,patch);this.listeners.forEach(fn=>fn(this.state));if(patch.tracking&&patch.tracking.archives?.length)setTimeout(()=>{if(currentRoute().path==="projects"&&!main.querySelector(".archive-library"))main.append(archiveLibrary(patch.tracking));});},subscribe(fn){this.listeners.add(fn);return()=>this.listeners.delete(fn);}};
+const store={state:{live:null,tracking:null,status:null,route:null},listeners:new Set(),set(patch){Object.assign(this.state,patch);if(patch.live&&patch.live.capacity)observeCapacity(patch.live);this.listeners.forEach(fn=>fn(this.state));if(patch.tracking&&patch.tracking.archives?.length)setTimeout(()=>{if(currentRoute().path==="projects"&&!main.querySelector(".archive-library"))main.append(archiveLibrary(patch.tracking));});},subscribe(fn){this.listeners.add(fn);return()=>this.listeners.delete(fn);}};
 const projectMapState=new Map();
 // Large flash-backed maps and WLAN connection setup share this bounded deadline.
 const PROJECT_READ_TIMEOUT=20000;
@@ -80,7 +80,7 @@ new MutationObserver(records=>records.forEach(record=>record.addedNodes.forEach(
 addEventListener("popstate",()=>{const dialog=overlay.querySelector("dialog[open]");if(dialog){closingSheetFromHistory=true;dialog.close("cancel");}});
 
 let activeController=null,pollTimer=0,pollBusy=false,connectionState={label:"Connecting",state:"warn"};
-function setConnection(label,state){connectionState={label,state:state||"warn"};if(state==="error")updateGlobalStatus(store.state.live);}
+function setConnection(label,state){connectionState={label,state:state||"warn"};if(state==="error"){capacityEstimate.reset();updateGlobalStatus(store.state.live);if(currentRoute().path==="status"&&store.state.live)updateCapacityPanel(store.state.live);}}
 function updateGlobalStatus(live){
   const target=$("live-state"),label=target.querySelector("b"),detail=target.querySelector("small");
   if(live&&live.tracking_startup&&live.tracking_startup.state!=="ready"){
@@ -127,15 +127,126 @@ async function measuredAction(action,values){
 }
 function qualityRows(live){const fix=live.current_fix||{},quality=live.current_quality||{},limits=quality.limits||{},rtcm=live.rtcm||{},required=limits.fix_quality||"RTK_FIXED",qual=Number(fix.qual),fixOk=required==="DGPS"?[2,4,5].includes(qual):required==="RTK_FLOAT"?[4,5].includes(qual):qual===4,ageLimit=Number(limits.max_correction_age_sec||5);return[{label:`${required.replaceAll("_"," ")} + corrections`,value:(fixOk&&rtcm.last_msg_age_sec!=null&&rtcm.last_msg_age_sec<=ageLimit),detail:`${fixLabel(fix)} · ${rtcm.mount||"—"}`},{label:"Horizontal accuracy",value:fix.receiver_accuracy&&fix.receiver_accuracy.horizontal_sigma_m!=null&&fix.receiver_accuracy.horizontal_sigma_m<=Number(limits.max_gst_horizontal_sigma_m||.05),detail:`H ${fmt(fix.receiver_accuracy&&fix.receiver_accuracy.horizontal_sigma_m,3)} m`},{label:"Vertical accuracy",value:fix.receiver_accuracy&&fix.receiver_accuracy.altitude_sigma_m!=null&&fix.receiver_accuracy.altitude_sigma_m<=Number(limits.max_gst_vertical_sigma_m||.1),detail:`V ${fmt(fix.receiver_accuracy&&fix.receiver_accuracy.altitude_sigma_m,3)} m`},{label:"Satellites and geometry",value:Number(fix.sats)>=Number(limits.min_satellites||10)&&Number(fix.hdop)<=Number(limits.max_hdop||1.5),detail:`${quantity(fix.sats||0,"satellite","satellites")} · HDOP ${fmt(fix.hdop,2)}`}];}
 
+// Capacity estimates use confirmed points, never the configured point distance.
+class CapacityEstimate {
+  constructor(){this.reset();}
+  reset(){this.samples=[];this.lineId=null;this.lastChange=0;this.used=null;this.limit=null;}
+  observe(live,now=Date.now()){
+    const line=live.active_line,capacity=live.capacity;
+    if(!capacity||!line||line.state!=="recording"||!(line.auto_distance_m>0)||capacity.writable===false||
+       (live.tracking_startup&&live.tracking_startup.state!=="ready")) {this.reset();return;}
+    const count=Number(line.vertex_count),last=this.samples[this.samples.length-1];
+    if(!Number.isFinite(count)){this.reset();return;}
+    if(this.lineId!==line.id||this.limit!==capacity.limit||capacity.used<this.used||
+       (last&&(count<last.count||now<last.at||now-last.at>15000||now-this.lastChange>15000)))this.reset();
+    const previous=this.samples[this.samples.length-1];
+    if(!previous||count>previous.count)this.lastChange=now;
+    this.lineId=line.id;this.used=capacity.used;this.limit=capacity.limit;
+    if(!previous||now>previous.at)this.samples.push({at:now,count});
+    while(this.samples.length>1&&this.samples[0].at<now-120000)this.samples.shift();
+  }
+  seconds(remaining,now=Date.now()){
+    const first=this.samples[0],last=this.samples[this.samples.length-1];
+    if(!first||!last||now-this.lastChange>15000||now-last.at>15000||
+       last.at-first.at<60000||last.count-first.count<10||remaining<=0)return null;
+    return remaining*(last.at-first.at)/(last.count-first.count)/1000;
+  }
+}
+const capacityEstimate=new CapacityEstimate();
+let capacityWarningLevel=0;
+const capacityNumber=value=>Number(value).toLocaleString(globalThis.RtkI18n&&RtkI18n.getLanguage()==="de"?"de-DE":"en-US");
+function capacityText(message,values={}){return localText(message).replace(/\{(\w+)\}/g,(_,key)=>values[key]??"");}
+function capacityLevel(capacity){
+  if(!capacity||!Number.isFinite(capacity.used)||!(capacity.limit>0))return -1;
+  const ratio=capacity.used/capacity.limit;
+  return ratio>=1?4:ratio>=.98?3:ratio>=.9?2:ratio>=.8?1:0;
+}
+function capacityMessage(capacity){
+  const level=capacityLevel(capacity),remaining=Math.max(0,capacity.limit-capacity.used);
+  return level===4?localText("Point limit reached"):level===3?
+    capacityText("Only {count} points available",{count:capacityNumber(remaining)}):
+    level===2?localText("Archive a project soon"):level===1?localText("Recording capacity is running low"):"";
+}
+function observeCapacity(live){
+  capacityEstimate.observe(live);
+  if(live.tracking_startup&&live.tracking_startup.state!=="ready")return;
+  const level=capacityLevel(live.capacity);
+  if(level<0)return;
+  if(level>capacityWarningLevel){
+    overlay.querySelectorAll(".capacity-toast").forEach(node=>node.remove());
+    const item=notice(capacityMessage(live.capacity),level>=3?"critical":"warn");
+    item.classList.add("toast","capacity-toast");
+    item.append(iconButton("Manage projects",()=>{item.remove();return chooseCapacityProject();},"secondary"),
+      iconButton("Dismiss",()=>item.remove(),"ghost"));
+    overlay.append(item);setTimeout(()=>item.remove(),10000);
+  }else if(level<capacityWarningLevel)overlay.querySelectorAll(".capacity-toast").forEach(node=>node.remove());
+  capacityWarningLevel=level;
+}
+function capacityPanel(){
+  return h("section",{class:"tool-card recording-capacity","aria-label":localText("Recording capacity")},
+    h("h2",{text:"Recording capacity"}),h("b",{class:"capacity-count",text:"—"}),
+    h("progress",{class:"capacity-meter",max:1,value:0,"aria-label":localText("Point limit usage")}),
+    h("strong",{class:"capacity-remaining",text:"Loading recording capacity"}),
+    h("small",{class:"capacity-estimate",text:"Remaining time cannot currently be estimated"}),
+    h("small",{class:"muted",text:"All non-archived projects combined"}),
+    h("p",{class:"capacity-message",role:"status"}),
+    iconButton("Manage projects",chooseCapacityProject,"secondary"));
+}
+function updateCapacityPanel(live){
+  const panel=statusRefs&&statusRefs.capacity;if(!panel)return;
+  const capacity=live.capacity||{},level=capacityLevel(capacity),line=live.active_line,
+    unavailable=level<0||connectionState.state==="error"||Boolean(live.tracking_startup&&live.tracking_startup.state!=="ready"),
+    remaining=unavailable?null:Math.max(0,capacity.limit-capacity.used),full=!unavailable&&level===4,
+    storageLow=!unavailable&&capacity.writable===false;
+  panel.className="tool-card recording-capacity"+(!unavailable&&level>=3?" critical":!unavailable&&level>0?" warn":"");
+  panel.querySelector(".capacity-count").textContent=unavailable?"—":
+    `${capacityNumber(capacity.used)} / ${capacityNumber(capacity.limit)} ${localText("points")} · ${Math.floor(capacity.used*100/capacity.limit)} %`;
+  const meter=panel.querySelector("progress");meter.hidden=unavailable;meter.max=capacity.limit||1;meter.value=capacity.used||0;
+  panel.querySelector(".capacity-remaining").textContent=unavailable?localText("Recording capacity unavailable"):
+    capacityText("{count} points available",{count:capacityNumber(remaining)});
+  const seconds=unavailable||storageLow?null:capacityEstimate.seconds(remaining);
+  panel.querySelector(".capacity-estimate").textContent=seconds===null?localText("Remaining time cannot currently be estimated"):
+    capacityText("About {minutes} min until the point limit at the current recording rate",{minutes:capacityNumber(Math.max(1,Math.round(seconds/60)))});
+  panel.querySelector(".capacity-estimate").hidden=full||!line;
+  const message=panel.querySelector(".capacity-message");
+  const messageText=unavailable?"":full?localText(line?"Your recorded points are saved. Archive another project to continue this line.":"Archive a project before recording more points."):
+    storageLow?localText("Device storage reserve reached. Export and manage stored data before continuing."):
+    line&&line.state==="paused"&&line.pause_reason==="capacity_limit"?localText("Capacity is available again. Resume the recording when ready."):capacityMessage(capacity);
+  if(message.textContent!==messageText)message.textContent=messageText;
+  message.hidden=!messageText;
+  const manage=panel.querySelector("button");manage.textContent=localText(full?"Choose project to archive":"Manage projects");manage.disabled=unavailable||manage.getAttribute("aria-busy")==="true";
+  if(full||storageLow){
+    statusRefs.hero.classList.remove("ready");statusRefs.hero.classList.add("blocked");
+    statusRefs.title.textContent=localText(full?(line&&line.state==="paused"?"Recording paused — point limit reached":"Point limit reached"):"Device storage reserve reached");
+  }
+}
+function lineStateButton(paused,capacityBlocked){
+  const button=iconButton(paused?"Resume":"Pause",()=>lineState(paused?"resume":"pause"),"secondary");
+  button.disabled=paused&&capacityBlocked;return button;
+}
+async function chooseCapacityProject(){
+  const tracking=await api.json("/api/tracking",{timeout:PROJECT_READ_TIMEOUT});
+  const projects=tracking.projects.filter(project=>!(tracking.active_line&&project.id===tracking.active_project_id)&&project.feature_count>0)
+    .sort((a,b)=>b.feature_count-a.feature_count);
+  if(!projects.length){
+    const accepted=await modal({title:"Manage projects",description:tracking.active_line?"No other project can be archived. Back up this project, finish its active line, then archive it and start a new project.":"There are no projects with recorded points to archive.",submit:"Open projects"});
+    if(accepted)location.hash="projects";return;
+  }
+  const values=await modal({title:"Choose project to archive",description:"Archiving preserves a verified copy on the device and frees its points from the active limit. Download an additional backup from the project page.",
+    fields:[{name:"project_id",label:"Project",type:"select",value:projects[0].id,options:projects.map(project=>({value:project.id,
+      label:capacityText("{name} · free {count} points",{name:project.name,count:capacityNumber(project.feature_count)})}))}],submit:"Archive project"});
+  if(values)await archiveProject(projects.find(project=>project.id===values.project_id),true,true);
+}
+
 let statusRefs=null,statusDetailsUpdatedAt=0;
-function mountStatus(){const hero=h("section",{class:"readiness-hero blocked"},h("p",{class:"kicker",text:"MEASUREMENT GATE"}),h("div",{class:"hero-state"},h("span",{class:"signal",text:"!"}),h("div",{},h("h2",{text:"Checking …"}),h("p",{text:"Waiting for receiver state"}))));const metrics=h("div",{class:"metric-grid"},...["Horizontal 1σ","Vertical 1σ","Satellites","Correction age"].map(label=>h("article",{class:"metric"},h("span",{text:label}),h("b",{text:"—"}))));const checks=h("section",{class:"tool-card conditions"},h("div",{class:"section-title"},h("p",{class:"kicker",text:"FIELD CONDITIONS"}),h("h2",{text:"Can I measure?"})),h("div",{class:"condition-list"}),h("div",{class:"control-help notice",text:"For a before/after stability check, record the same known point twice as type control with exactly the same name."}));const context=h("section",{class:"tool-card field-context"},...['Project','Measurement','Position','Last point','Storage'].map(label=>h("div",{class:"context-row","data-context":label.toLowerCase().replace(' ', '-')},h("span",{text:label}),h("b",{text:label==='Measurement'?sampleLabel(sampleCount):'—'}))));const diagnostics=h("details",{class:"tool-card status-diagnostics"},h("summary",{text:"Receiver details"}),h("div",{class:"status-detail-rows"},dataRow("Loading","—")));const actions=h("div",{class:"field-actions"});hero.append(metrics);replace(main,h("div",{class:"status-layout"},hero,h("div",{class:"status-side"},checks,context,diagnostics,actions)));statusRefs={hero,title:hero.querySelector("h2"),subtitle:hero.querySelector(".hero-state p"),metrics:[...metrics.querySelectorAll("b")],checks:checks.querySelector(".condition-list"),control:checks.querySelector(".control-help"),project:context.querySelector('[data-context="project"] b'),position:context.querySelector('[data-context="position"]'),last:context.querySelector('[data-context="last-point"]'),storage:context.querySelector('[data-context="storage"] b'),diagnostics:diagnostics.querySelector(".status-detail-rows"),actions};}
+function mountStatus(){const hero=h("section",{class:"readiness-hero blocked"},h("p",{class:"kicker",text:"MEASUREMENT GATE"}),h("div",{class:"hero-state"},h("span",{class:"signal",text:"!"}),h("div",{},h("h2",{text:"Checking …"}),h("p",{text:"Waiting for receiver state"}))));const metrics=h("div",{class:"metric-grid"},...["Horizontal 1σ","Vertical 1σ","Satellites","Correction age"].map(label=>h("article",{class:"metric"},h("span",{text:label}),h("b",{text:"—"}))));const checks=h("section",{class:"tool-card conditions"},h("div",{class:"section-title"},h("p",{class:"kicker",text:"FIELD CONDITIONS"}),h("h2",{text:"Can I measure?"})),h("div",{class:"condition-list"}),h("div",{class:"control-help notice",text:"For a before/after stability check, record the same known point twice as type control with exactly the same name."}));const context=h("section",{class:"tool-card field-context"},...['Project','Measurement','Position','Last point','Storage'].map(label=>h("div",{class:"context-row","data-context":label.toLowerCase().replace(' ', '-')},h("span",{text:label}),h("b",{text:label==='Measurement'?sampleLabel(sampleCount):'—'}))));const diagnostics=h("details",{class:"tool-card status-diagnostics"},h("summary",{text:"Receiver details"}),h("div",{class:"status-detail-rows"},dataRow("Loading","—")));const actions=h("div",{class:"field-actions"});hero.append(metrics);const capacity=capacityPanel();context.querySelector('[data-context="storage"] span').textContent=localText("Free device storage");replace(main,h("div",{class:"status-layout"},h("div",{class:"status-primary"},hero,capacity),h("div",{class:"status-side"},checks,context,diagnostics,actions)));statusRefs={capacity,hero,title:hero.querySelector("h2"),subtitle:hero.querySelector(".hero-state p"),metrics:[...metrics.querySelectorAll("b")],checks:checks.querySelector(".condition-list"),control:checks.querySelector(".control-help"),project:context.querySelector('[data-context="project"] b'),position:context.querySelector('[data-context="position"]'),last:context.querySelector('[data-context="last-point"]'),storage:context.querySelector('[data-context="storage"] b'),diagnostics:diagnostics.querySelector(".status-detail-rows"),actions};}
 async function refreshStatusDetails(signal){try{const status=await api.json("/status",{signal}),fix=status.fix||{},stats=status.stats||{},streak=status.quality_streak||{},history=stats.fix_quality_seconds||{},total=Object.values(history).reduce((sum,value)=>sum+Number(value||0),0),rows=[dataRow("Fix age",status.fix_age_sec==null?null:`${fmt(status.fix_age_sec,1)} s`),dataRow("RTK FIXED for",streak.since_rtk_fixed_sec==null?null:duration(streak.since_rtk_fixed_sec)),dataRow("Reference station",fix.station_id),dataRow("Last NTRIP error",stats.last_ntrip_error&&stats.last_ntrip_error!=="N/A"?stats.last_ntrip_error:null)];if(total)rows.push(h("div",{class:"quality-history"},...Object.entries(history).sort((a,b)=>b[1]-a[1]).map(([quality,seconds])=>h("div",{class:"quality-history-row"},h("span",{text:({0:"NO FIX",1:"GPS FIX",2:"DGPS",4:"RTK FIXED",5:"RTK FLOAT"})[quality]||quality}),h("progress",{max:total,value:seconds}),h("b",{text:`${duration(seconds)} · ${Math.round(seconds/total*100)} %`})))));replace(statusRefs.diagnostics,...rows.filter(row=>row.querySelector("b")?row.querySelector("b").textContent!=="—":true));statusDetailsUpdatedAt=Date.now();}catch(error){if(error.name!=="AbortError")replace(statusRefs.diagnostics,notice("Receiver details could not be loaded.","warn"));}}
 function updateStatus(live){
   if(!statusRefs)return;const fix=live.current_fix||{},quality=live.current_quality||{},line=live.active_line,accepted=Boolean(quality.accepted),recording=line&&line.state==="recording",paused=line&&line.state==="paused",project=live.active_project,board=live.board||{};
   statusRefs.hero.className="readiness-hero "+(accepted?"ready":"blocked")+(recording?" recording":"")+(paused?" paused":"");statusRefs.hero.querySelector(".signal").textContent=recording?"●":paused?"‖":accepted?"✓":"!";statusRefs.title.textContent=localText(recording?"Recording":paused?"Recording paused":accepted?"Ready to measure":"Measurement blocked");const streak=live.quality_streak||{},rows=qualityRows(live),failedIndex=rows.findIndex(item=>!item.value),recovery=["Wait for the required fix or check the correction stream.","Keep the antenna still and wait for horizontal accuracy.","Keep the antenna still and wait for vertical accuracy.","Move to a clearer view of the sky."][failedIndex];statusRefs.subtitle.textContent=recording||paused?`${fixLabel(fix)} · ${line.name} · ${quantity(line.vertex_count,"line point","line points")} · ${quantity(project?project.point_count:0,"object point","object points")} · ${fmt(line.length_m,1)} m`:accepted?`${localText("Stable for")} ${duration(streak.gate_streak_sec)}`:localText(recovery||"Wait for all field conditions.");
   const receiver=fix.receiver_accuracy||{};[`${fmt(receiver.horizontal_sigma_m,3)} m`,`${fmt(receiver.altitude_sigma_m,3)} m`,String(fix.sats||0),`${fmt(live.rtcm&&live.rtcm.last_msg_age_sec,1)} s`].forEach((value,index)=>statusRefs.metrics[index].textContent=value);const checkSignature=rows.map(item=>`${item.value}:${item.detail}`).join("|");if(statusRefs.checkSignature!==checkSignature){replace(statusRefs.checks,...rows.map(item=>h("div",{class:"condition "+(item.value?"pass":"fail")},h("span",{class:"condition-mark",text:item.value?"✓":"×"}),h("span",{},h("b",{text:item.label}),h("small",{text:item.detail})))));statusRefs.checkSignature=checkSignature;}statusRefs.control.hidden=!accepted;
-  statusRefs.project.textContent=project?`${project.name} · ${project.line_count} ${localText("lines")} / ${project.point_count} ${localText("object points")}`:localText("No project selected");const position=statusRefs.position.querySelector("b");position.textContent=fix.lat==null?"—":`${fmt(fix.alt,3)} m · ${Number(fix.lat).toFixed(7)} / ${Number(fix.lon).toFixed(7)}${accepted?"":` · ${localText("not ready for measurement")}`}`;statusRefs.position.hidden=fix.lat==null;const last=statusRefs.last.querySelector("b"),lastPoint=line&&line.last_point;last.textContent=lastPoint?`${lastPoint.label} · ${lastPoint.age_sec==null?'—':lastPoint.age_sec} s · H ${fmt(lastPoint.h_sigma_m,3)} m`:"—";statusRefs.last.hidden=!lastPoint;const capacity=live.capacity||{},capacityFull=capacity.level==="full",capacityWarn=["notice","warning","critical","full"].includes(capacity.level),storageLow=board.fs_total_bytes&&board.fs_free_bytes/board.fs_total_bytes<.1;statusRefs.storage.textContent=capacity.limit==null?"—":`${capacity.used} / ${capacity.limit} ${localText("measurement points")} · ${capacity.percent}%`;statusRefs.storage.hidden=!capacityWarn&&!storageLow;
-  replace(statusRefs.actions);const blocked=!accepted||storageLow||capacityFull,capacityMessage=capacityFull?"Point limit reached. Export and archive a project before continuing.":"Export or optimize survey data before recording more points.";if(!project){statusRefs.actions.append(iconButton("Choose project",()=>location.hash="projects","primary"));}else if(!line){const start=iconButton("Start line",startLine,"primary"),asset=iconButton("Object point",addAsset,"secondary");start.disabled=asset.disabled=blocked;statusRefs.actions.append(start,asset);if(project.line_count||project.point_count)statusRefs.actions.append(iconButton("Undo last point",undoLast,"danger ghost"));if(blocked)statusRefs.actions.append(h("small",{class:"action-reason",text:capacityFull?capacityMessage:storageLow?"Export or optimize survey data before recording more points.":"Measurement actions unlock when all field conditions pass."}));}else{const vertex=iconButton("Add line point",addVertex,"primary"),asset=iconButton("Object point",addAsset,"secondary");vertex.disabled=asset.disabled=blocked||paused;statusRefs.actions.append(vertex,asset,iconButton(paused?"Resume":"Pause",()=>lineState(paused?"resume":"pause"),"secondary"),iconButton("Finish line",()=>finishLine(line),"danger"),iconButton("Undo last point",undoLast,"danger ghost"));if(blocked||paused)statusRefs.actions.append(h("small",{class:"action-reason",text:capacityFull?capacityMessage:storageLow?"Export or optimize survey data before recording more points.":paused&&line.pause_reason==="capacity_limit"?capacityMessage:paused?"Resume the line before recording another point.":"Measurement actions unlock when all field conditions pass."}));}setConnection(`${localText(recording?"Recording":paused?"Recording paused":"Updated")} ${recording||paused?duration(line.recording_sec):globalThis.RtkI18n?RtkI18n.formatTime(new Date()):new Date().toLocaleTimeString()}`,accepted&&!capacityFull?"ok":"warn");
+  statusRefs.project.textContent=project?`${project.name} · ${project.line_count} ${localText("lines")} / ${project.point_count} ${localText("object points")}`:localText("No project selected");const position=statusRefs.position.querySelector("b");position.textContent=fix.lat==null?"—":`${fmt(fix.alt,3)} m · ${Number(fix.lat).toFixed(7)} / ${Number(fix.lon).toFixed(7)}${accepted?"":` · ${localText("not ready for measurement")}`}`;statusRefs.position.hidden=fix.lat==null;const last=statusRefs.last.querySelector("b"),lastPoint=line&&line.last_point;last.textContent=lastPoint?`${lastPoint.label} · ${lastPoint.age_sec==null?'—':lastPoint.age_sec} s · H ${fmt(lastPoint.h_sigma_m,3)} m`:"—";statusRefs.last.hidden=!lastPoint;const capacity=live.capacity||{},capacityFull=capacity.level==="full",storageLow=capacity.writable===false||Boolean(board.fs_total_bytes&&board.fs_free_bytes/board.fs_total_bytes<.2);statusRefs.storage.textContent=board.fs_total_bytes?`${fmt(board.fs_free_bytes/1048576,1)} / ${fmt(board.fs_total_bytes/1048576,1)} MiB`:"—";statusRefs.storage.hidden=false;
+  replace(statusRefs.actions);const blocked=!accepted||storageLow||capacityFull,capacityMessage=capacityFull?"Point limit reached. Archive another project to continue this line.":"Device storage reserve reached. Export and manage stored data before continuing.";if(!project){statusRefs.actions.append(iconButton("Choose project",()=>location.hash="projects","primary"));}else if(!line){const start=iconButton("Start line",startLine,"primary"),asset=iconButton("Object point",addAsset,"secondary");start.disabled=asset.disabled=blocked;statusRefs.actions.append(start,asset);if(project.line_count||project.point_count)statusRefs.actions.append(iconButton("Undo last point",undoLast,"danger ghost"));if(blocked)statusRefs.actions.append(h("small",{class:"action-reason",text:capacityFull?capacityMessage:storageLow?"Export or optimize survey data before recording more points.":"Measurement actions unlock when all field conditions pass."}));}else{const vertex=iconButton("Add line point",addVertex,"primary"),asset=iconButton("Object point",addAsset,"secondary");vertex.disabled=asset.disabled=blocked||paused;statusRefs.actions.append(vertex,asset,lineStateButton(paused,capacityFull||storageLow),iconButton("Finish line",()=>finishLine(line),"danger"),iconButton("Undo last point",undoLast,"danger ghost"));if(blocked||paused)statusRefs.actions.append(h("small",{class:"action-reason",text:capacityFull?capacityMessage:storageLow?"Export or optimize survey data before recording more points.":paused&&line.pause_reason==="capacity_limit"?capacityMessage:paused?"Resume the line before recording another point.":"Measurement actions unlock when all field conditions pass."}));}setConnection(`${localText(recording?"Recording":paused?"Recording paused":"Updated")} ${recording||paused?duration(line.recording_sec):globalThis.RtkI18n?RtkI18n.formatTime(new Date()):new Date().toLocaleTimeString()}`,accepted&&!capacityFull?"ok":"warn");
 }
 const updateStatusBase=updateStatus;
 updateStatus=function(live){
@@ -152,14 +263,15 @@ updateStatus=function(live){
   const routeStart=(!live.active_line&&live.active_project&&
     statusRefs.actions.querySelector("button"));
   if(routeStart){const capacity=live.capacity||{},board=live.board||{};
-    routeStart.disabled=capacity.level==="full"||Boolean(board.fs_total_bytes&&
-      board.fs_free_bytes/board.fs_total_bytes<.1);}
+    routeStart.disabled=capacity.level==="full"||capacity.writable===false||Boolean(board.fs_total_bytes&&
+      board.fs_free_bytes/board.fs_total_bytes<.2);}
   const progress=live.measurement_progress||{},phase={waiting_fix:"Waiting for RTK FIXED and valid GST",collecting:"Collecting valid samples",checking_spread:"Checking measurement spread"}[progress.phase]||progress.phase;
   statusRefs.control.hidden=!Boolean((live.current_quality||{}).accepted);
   statusRefs.control.classList.toggle("visible",!statusRefs.control.hidden);
   const failedConditions=[...statusRefs.checks.querySelectorAll(".condition.fail")],passedConditions=[...statusRefs.checks.querySelectorAll(".condition.pass")];if(failedConditions.length&&passedConditions.length&&!statusRefs.checks.querySelector(".passed-conditions")){const passed=h("details",{class:"passed-conditions"},h("summary",{text:`${passedConditions.length} ${localText("conditions already met")}`}),...passedConditions);statusRefs.checks.append(passed);}
   const storageRow=statusRefs.storage.closest(".context-row");
-  storageRow.classList.toggle("warn",!storageRow.hidden);
+  storageRow.classList.toggle("warn",live.capacity&&live.capacity.writable===false);
+  updateCapacityPanel(live);
   const detailBox=statusRefs.diagnostics,rtcm=live.rtcm||{},accuracy=(live.current_fix||{}).receiver_accuracy||{};
   const network=live.network||{},wifiError=network.last_wifi_error,
     wifiMessage=({access_point_not_found:"Hotspot not found",authentication_failed:"Wi-Fi authentication failed",association_failed:"Wi-Fi association failed",connection_timeout:"Wi-Fi connection timed out",connection_lost:"Wi-Fi connection lost"})[wifiError]||wifiError;
@@ -279,7 +391,7 @@ async function mountProjectDetail(tracking,signal){
       iconButton("Share GeoJSON",share,"secondary"),
       h("a",{class:"btn secondary",href:`/api/tracking/export?project_id=${encodeURIComponent(project.id)}&format=csv`,text:"Download point CSV"}),
       h("a",{class:"btn secondary",href:`/api/tracking/export?project_id=${encodeURIComponent(project.id)}&format=backup`,text:"Download restorable project archive"})),
-    h("div",{class:"text-actions"},iconButton("Rename",()=>renameProject(project),"ghost"),(()=>{const button=iconButton("Archive",()=>archiveProject(project),"secondary");button.disabled=Boolean(tracking.active_line);button.title=tracking.active_line?"Finish the active line before archiving this project.":"";return button;})(),(()=>{const button=iconButton("Delete",()=>deleteProject(project),"danger ghost");button.disabled=Boolean(tracking.active_line);button.title=tracking.active_line?"Finish the active line before deleting this project.":"";return button;})()));
+    h("div",{class:"text-actions"},iconButton("Rename",()=>renameProject(project),"ghost"),(()=>{const button=iconButton("Archive",()=>archiveProject(project),"secondary");button.disabled=Boolean(tracking.active_line&&projectIsActive);button.title=button.disabled?localText("Finish the active line before archiving this project."):"";return button;})(),(()=>{const button=iconButton("Delete",()=>deleteProject(project),"danger ghost");button.disabled=Boolean(tracking.active_line&&projectIsActive);button.title=button.disabled?localText("Finish the active line before deleting this project."):"";return button;})()));
   const chip=h("span",{class:"quality-chip warn",text:"Loading live status"}),legend=h("div",{class:"map-legend"},h("span",{},h("i",{class:"legend-line"}),text("Survey line")),h("span",{},h("i",{class:"legend-point"}),text("Object point")),h("span",{},h("i",{class:"legend-position"}),text("Receiver"))),canvas=h("div",{class:"map-canvas"});
   const persisted=projectMapState.get(project.id)||{};let mapGraphic=null,zoom=persisted.zoom||1,panX=persisted.panX||0,panY=persisted.panY||0,drag=null,pinch=null,minus=null,plus=null,zoomLabel=null;const layers=Object.assign({line:true,point:true,position:true},persisted.layers||{});
   const applyTransform=()=>{if(!mapGraphic||!mapGraphic.mapWorld)return;mapGraphic.mapWorld.style.transform=`translate(${panX}px,${panY}px) scale(${zoom})`;mapGraphic.querySelectorAll(".map-point,.map-position").forEach(marker=>marker.style.transform=`scale(${1/zoom})`);mapGraphic.querySelectorAll(".map-line").forEach(node=>node.hidden=!layers.line);mapGraphic.querySelectorAll(".map-point").forEach(node=>node.hidden=!layers.point);mapGraphic.querySelectorAll(".map-position").forEach(node=>node.hidden=!layers.position);if(mapGraphic.scaleText)mapGraphic.scaleText.textContent=`${Number((mapGraphic.scaleMetres/zoom).toPrecision(2))} m`;if(zoomLabel)zoomLabel.textContent=`${Math.round(zoom*100)} %`;if(minus)minus.disabled=zoom<=.5;if(plus)plus.disabled=zoom>=4;projectMapState.set(project.id,{zoom,panX,panY,layers:Object.assign({},layers)});};
@@ -309,7 +421,13 @@ async function mountProjectDetail(tracking,signal){
 }
 async function renameProject(project){const values=await modal({title:"Rename project",fields:[{name:"name",label:"Project name",value:project.name,required:true,maxLength:80}],submit:"Rename"});if(values)try{await trackingAction("rename_project",{project_id:project.id,name:values.name});location.hash="projects";}catch(error){showError(error);}}
 async function deleteProject(project){const values=await modal({title:"Delete project",description:`${project.name} and all contained survey data will be permanently deleted. Enter the project name to confirm.`,fields:[{name:"confirm",label:"Project name",required:true,validate:value=>value===project.name,validationMessage:"The project name does not match."}],submit:"Delete project",danger:true});if(!values)return;setConnection("Deleting project …","warn");try{await trackingAction("delete_project",{project_id:project.id});location.hash="projects";showSuccess(`Project “${project.name}” deleted`);}catch(error){setConnection("Project was not deleted","error");showError(error);}}
-async function archiveProject(project){const accepted=await modal({title:"Archive project",description:`Create and verify a restorable archive of “${project.name}” before removing it from active memory?`,submit:"Archive project"});if(!accepted)return;try{await trackingAction("archive_project",{project_id:project.id});location.hash="projects";showSuccess(`Project “${project.name}” archived`);}catch(error){showError(error);}}
+async function archiveProject(project,returnToStatus=false,confirmed=false){
+  const accepted=confirmed||await modal({title:"Archive project",description:capacityText("Create and verify an archive of “{name}”, then free {count} points? An existing pause remains in place; recording never resumes automatically.",{name:project.name,count:capacityNumber(project.feature_count||0)}),submit:"Archive project"});
+  if(!accepted)return;
+  await trackingAction("archive_project",{project_id:project.id});
+  location.hash=returnToStatus?"status":"projects";
+  showSuccess(capacityText("Project “{name}” archived",{name:project.name}));
+}
 async function verifyArchive(item){try{const result=await trackingAction("verify_archive",{archive_id:item.id});if(!result.valid)throw new Error("Archive integrity check failed.");showSuccess(`Archive “${item.name}” verified`);}catch(error){showError(error);}}
 async function reactivateArchive(item){const accepted=await modal({title:"Reactivate project",description:`Restore “${item.name}” to active memory? Capacity and flash reserve are checked first.`,submit:"Reactivate"});if(!accepted)return;try{await trackingAction("reactivate_archive",{archive_id:item.id});renderRoute();showSuccess(`Project “${item.name}” reactivated`);}catch(error){showError(error);}}
 

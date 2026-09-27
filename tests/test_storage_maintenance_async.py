@@ -69,6 +69,25 @@ class StorageMaintenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reopened.feature_count(), 161)
         reopened.point_store.close(); reopened._sync_journal(True)
 
+    async def test_archive_other_project_keeps_full_line_paused(self):
+        old = self.project('Previous trip', 2)
+        current = self.tracker.create_project('Current trip')
+        line = self.tracker.start_line('Keep paused', 1, fix=FIX)
+        self.tracker.max_features = 3
+        with self.assertRaises(ValueError):
+            self.tracker.add_vertex(dict(FIX, lon=8.00004), source='automatic')
+        before = self.tracker.backup()['projects'][1]
+        archived = await self.tracker.archive_project_async(old['id'])
+        self.assertTrue((await self.tracker.verify_archive_async(archived['id']))['valid'])
+        self.assertEqual(self.tracker.capacity()['remaining'], 2)
+        self.assertEqual(self.tracker.active_project_id, current['id'])
+        self.assertEqual(self.tracker.active_line_id, line['id'])
+        self.assertEqual(self.tracker.status()['active_line']['state'], 'paused')
+        after = self.tracker.backup()['projects'][0]
+        self.assertEqual(before, after)
+        self.tracker.set_line_state('resume')
+        self.assertTrue(self.tracker.on_fix(dict(FIX, lon=8.00006)))
+
     async def test_point_rewrite_mixed_segments_and_following_append(self):
         store = FlashPointStore(os.path.join(self.folder.name, 'mixed'))
         for order in range(1, 65):

@@ -2880,6 +2880,8 @@ class Tracker:
                     project["id"], project.get("created_at")),
                 "line_count": len(project["lines"]),
                 "point_count": len(project["points"]),
+                "feature_count": len(project["points"]) + sum(
+                    len(line["coordinates"]) for line in project["lines"]),
                 "last_quality_accepted": accepted,
                 "progress": ("recording" if "recording" in states else
                              "paused" if "paused" in states else

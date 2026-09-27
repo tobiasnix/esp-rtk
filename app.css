@@ -59,3 +59,20 @@
 .status-diagnostics summary,.technical-details summary{min-height:46px;font-weight:850;cursor:pointer}.status-detail-rows,.technical-details[open]>*+*{margin-top:var(--s2)}.quality-history{padding-top:var(--s2);border-top:1px solid var(--line)}.quality-history-row{display:grid;grid-template-columns:90px minmax(60px,1fr) minmax(110px,auto);gap:var(--s2);align-items:center;min-height:40px}.quality-history-row progress{width:100%;accent-color:var(--ok)}.quality-history-row b{text-align:right;font:700 11px var(--mono)}.vertex-row.warn{border-color:var(--warn);background:var(--warn-soft)}.rtcm-message-row{display:grid;grid-template-columns:56px minmax(0,1fr) auto;gap:var(--s2);align-items:center;min-height:52px;border-top:1px solid var(--line)}.rtcm-message-row span{min-width:0;color:var(--muted);overflow-wrap:anywhere}.endpoint-list{display:grid;border-top:1px solid var(--line)}.endpoint-list a{display:flex;min-height:48px;align-items:center;justify-content:space-between;gap:var(--s2);border-bottom:1px solid var(--line);color:var(--ink);text-decoration:none}.endpoint-list code,.technical-details code{overflow-wrap:anywhere;word-break:break-word}.log-actions{flex-wrap:wrap}.log-actions .btn{flex:1 1 130px}@media(max-width:380px){.quality-history-row{grid-template-columns:74px minmax(45px,1fr);}.quality-history-row b{grid-column:1/-1;text-align:left}.rtcm-message-row{grid-template-columns:48px minmax(0,1fr) auto}}
 :root[data-theme="high-contrast"] .status-diagnostics,:root[data-theme="high-contrast"] .technical-details,:root[data-theme="high-contrast"] .rtcm-message-row{border-width:2px}:root[data-theme="high-contrast"] progress::-webkit-progress-value{background:repeating-linear-gradient(135deg,var(--ink),var(--ink) 5px,var(--surface) 6px,var(--surface) 8px)}:root[data-theme="high-contrast"] progress::-moz-progress-bar{background:repeating-linear-gradient(135deg,var(--ink),var(--ink) 5px,var(--surface) 6px,var(--surface) 8px)}
 @media(max-width:899px){.map-workspace{overflow:visible;border-inline:0;border-radius:0}.map-canvas,.survey-map,.map-empty{min-height:clamp(460px,68svh,680px)}.map-panel{padding:var(--s3) var(--s3) 104px}.map-tools{top:58px;right:var(--s2);left:var(--s2);display:grid;grid-template-columns:44px minmax(58px,1fr) 44px repeat(3,minmax(0,1fr));gap:4px;max-width:none;overflow:visible}.map-tools .btn{min-width:0;min-height:44px;padding:var(--s1);font-size:11px;white-space:normal}.map-zoom{min-width:0}.map-layers{top:154px;right:var(--s2);max-width:calc(100% - var(--s4));flex-wrap:wrap;justify-content:flex-end}.quality-chip{top:var(--s2);left:var(--s2)}.map-line{stroke-width:7}.map-point{stroke-width:6}.map-legend{overflow-x:auto;justify-content:flex-start;padding-inline:var(--s2);white-space:nowrap}}
+
+/* Keep capacity next to the recording status on both phone and desktop. */
+.status-primary{display:grid;gap:var(--s3);min-width:0;align-content:start}
+.status-primary .readiness-hero{position:relative;top:auto}
+.recording-capacity{display:grid;gap:6px;border-left:4px solid var(--line)}
+.recording-capacity h2{margin:0;font-size:16px}
+.capacity-count{font:700 17px/1.4 var(--mono);overflow-wrap:anywhere}
+.capacity-meter{display:block;width:100%;height:10px;accent-color:var(--ok)}
+.recording-capacity.warn{border-left-color:var(--warn)}
+.recording-capacity.warn .capacity-meter{accent-color:var(--warn)}
+.recording-capacity.critical{border-left-color:var(--critical)}
+.recording-capacity.critical .capacity-meter{accent-color:var(--critical)}
+.capacity-estimate{color:var(--muted)}
+.capacity-message{margin:2px 0;font-size:14px}
+.recording-capacity .btn{justify-self:start}
+.capacity-toast .btn{margin:6px 6px 0 0}
+@media(min-width:900px){.status-primary{position:sticky;top:96px}}

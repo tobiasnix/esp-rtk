@@ -239,6 +239,34 @@ class TestTracking(unittest.TestCase):
         self.assertEqual(restored["id"], project["id"])
         self.assertEqual(self.tracker.feature_count(), 1)
 
+    def test_archive_other_project_preserves_capacity_paused_line_after_reload(self):
+        with mock.patch.object(tracking, "MAX_FEATURES", 3):
+            old = self.tracker.create_project("Previous trip")
+            self.tracker.start_line("Finished trip", 1, fix=FIX)
+            self.tracker.add_vertex(dict(FIX, lon=8.00002))
+            self.tracker.set_line_state("finish")
+            current = self.tracker.create_project("Current trip")
+            line = self.tracker.start_line("Continue this", 1, fix=FIX)
+            with self.assertRaises(ValueError):
+                self.tracker.add_vertex(dict(FIX, lon=8.00004), source="automatic")
+            self.assertEqual(self.tracker.capacity()["used"], 3)
+            summary = self.tracker.status()
+            self.assertEqual([p["feature_count"] for p in summary["projects"]], [2, 1])
+            self.assertEqual(summary["active_line"]["pause_reason"], "capacity_limit")
+            with self.assertRaises(ValueError):
+                self.tracker.archive_project(current["id"])
+            archived = self.tracker.archive_project(old["id"])
+            self.assertTrue(self.tracker.verify_archive(archived["id"])["valid"])
+            restored = tracking.Tracker(self.path)
+            self.assertEqual(restored.active_project_id, current["id"])
+            self.assertEqual(restored.active_line_id, line["id"])
+            self.assertEqual(restored.status()["active_line"]["state"], "paused")
+            self.assertEqual(restored.capacity()["remaining"], 2)
+            self.assertEqual(restored.status()["active_line"]["vertex_count"], 1)
+            restored.set_line_state("resume")
+            self.assertTrue(restored.on_fix(dict(FIX, lon=8.00006)))
+            self.assertEqual(restored.status()["active_line"]["vertex_count"], 2)
+
     def test_corrupt_archive_is_rejected_without_changing_active_data(self):
         project = self.tracker.create_project("Corrupt archive")
         self.tracker.start_line("Line", 0, fix=FIX)

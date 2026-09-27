@@ -21,7 +21,7 @@ validate_wifi_networks = _validation.validate_wifi_networks
 # ---------------------------------------------------------------------------
 
 CONFIG = {
-    "version": "ESP-RTK V15.8.0",
+    "version": "ESP-RTK V15.8.1",
     "config_schema_version": 3,
 
     "config_file": "config.json",

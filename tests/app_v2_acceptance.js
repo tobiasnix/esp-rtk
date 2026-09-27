@@ -175,6 +175,15 @@ async function fixture(route) {
       ],
       has_more_vertices: offset === 0,
     };
+  } else if (path === "/api/tracking" && method === "POST" && route.request().postDataJSON().action === "archive_project") {
+    const id=route.request().postDataJSON().project_id;
+    assert.notStrictEqual(id,tracking.active_line&&tracking.active_project_id);
+    const project=tracking.projects.find(item=>item.id===id);
+    tracking.projects=tracking.projects.filter(item=>item.id!==id);
+    live.capacity={...live.capacity,used:live.capacity.used-project.feature_count,
+      remaining:live.capacity.remaining+project.feature_count,level:"ok"};
+    tracking.capacity=live.capacity;
+    body={tracking_live:live};
   } else if (path === "/api/tracking" && method === "POST" && route.request().postDataJSON().action === "add_vertex") {
     await new Promise(resolve => { finishMeasurement = resolve; });
     body = { tracking_live: live };
@@ -267,6 +276,68 @@ async function fixture(route) {
     body: JSON.stringify(body),
   });
 }
+async function testCapacity(page){
+  console.log("capacity: initial display");
+  const panel=page.locator(".recording-capacity");
+  await page.waitForFunction(()=>document.querySelector(".capacity-count").textContent.includes("5,000"));
+  assert((await panel.innerText()).includes("4,969 points available"));
+  assert(await panel.isVisible());
+  const box=await panel.boundingBox();
+  assert(box.y+box.height<900-60,"capacity must be visible above phone navigation");
+  console.log("capacity: warning thresholds");
+  for(const [used,level] of [[4000,"notice"],[4500,"warning"],[4900,"critical"],[5000,"full"]]){
+    live.capacity={used,limit:5000,remaining:5000-used,level,writable:true};
+    await page.waitForFunction(value=>document.querySelector(".capacity-count").textContent.startsWith(value),used.toLocaleString("en-US"));
+    assert(await page.locator(".capacity-toast").isVisible(),"threshold warning must appear");
+    await page.locator(".capacity-toast").getByRole("button",{name:"Dismiss"}).click();
+    await page.waitForTimeout(2200);
+    assert.strictEqual(await page.locator(".capacity-toast").count(),0,"same threshold must not notify repeatedly");
+  }
+  console.log("capacity: archive workflow");
+  live.active_line={id:"capacity-line",name:"Paused trip",state:"paused",pause_reason:"capacity_limit",vertex_count:2000,length_m:2000,auto_distance_m:1};
+  tracking.active_line={...live.active_line};tracking.active_project_id="p1";
+  tracking.projects[0].feature_count=3500;tracking.projects[1].feature_count=1500;
+  tracking.capacity=live.capacity;
+  await page.waitForFunction(()=>document.querySelector(".readiness-hero h2").textContent.includes("Recording paused"));
+  assert(await page.getByRole("button",{name:"Resume",exact:true}).isDisabled());
+  assert((await panel.innerText()).includes("Your recorded points are saved"));
+  await go(page,"projects/p1",".map-workspace");
+  assert(await page.getByRole("button",{name:"Archive",exact:true}).isDisabled());
+  assert(await page.getByRole("button",{name:"Delete",exact:true}).isDisabled());
+  await go(page,"projects/p2",".map-workspace");
+  assert(await page.getByRole("button",{name:"Archive",exact:true}).isEnabled());
+  assert(await page.getByRole("button",{name:"Delete",exact:true}).isEnabled());
+  await go(page,"status",".recording-capacity");
+  await page.getByRole("button",{name:"Choose project to archive",exact:true}).click();
+  await page.waitForSelector("dialog[open] select");
+  assert.strictEqual(await page.locator('select[name="project_id"] option').count(),1);
+  assert((await page.locator('select[name="project_id"]').innerText()).includes("1,500"));
+  await page.getByRole("button",{name:"Archive project",exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector(".capacity-count").textContent.startsWith("3,500"));
+  assert.strictEqual(live.active_line.state,"paused");
+  assert.strictEqual(live.active_line.id,"capacity-line");
+  assert(await page.getByRole("button",{name:"Resume",exact:true}).isEnabled());
+  assert((await panel.innerText()).includes("Capacity is available again"));
+  live.capacity={...live.capacity,writable:false};
+  await page.waitForFunction(()=>document.querySelector(".readiness-hero h2").textContent.includes("storage reserve"));
+  assert(await page.getByRole("button",{name:"Resume",exact:true}).isDisabled());
+  live.capacity={...live.capacity,writable:true};
+  failLive=true;
+  await page.waitForFunction(()=>document.querySelector(".capacity-remaining").textContent.includes("unavailable"));
+  assert.strictEqual(await page.locator(".capacity-count").innerText(),"—");
+  failLive=false;
+  await page.waitForFunction(()=>document.querySelector(".capacity-count").textContent.startsWith("3,500"));
+  await page.evaluate(()=>RtkI18n.setLanguage("de"));
+  await page.waitForFunction(()=>document.querySelector(".recording-capacity h2").textContent===RtkI18n.v2de["Recording capacity"]);
+  assert((await panel.innerText()).includes("3.500 / 5.000"));
+  assert((await panel.innerText()).includes("1.500"));
+  for(const width of [320,360,1280]){
+    await page.setViewportSize({width,height:900});
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`capacity overflow at ${width}`);
+  }
+  await page.setViewportSize({width:360,height:900});
+  await page.screenshot({path:"/tmp/capacity-status-phone.png",fullPage:true});
+}
 async function go(page, hash, selector) {
   await page.evaluate((value) => (location.hash = value), hash);
   await page.waitForSelector(selector);
@@ -281,6 +352,8 @@ async function go(page, hash, selector) {
       viewport: { width: 360, height: 900 },
       acceptDownloads: true,
     });
+  page.setDefaultTimeout(20000);
+  page.on("pageerror",error=>console.error("Browser error:",error));
   await page.addInitScript(() => {
     Object.defineProperty(navigator, "wakeLock", {
       value: {
@@ -294,6 +367,12 @@ async function go(page, hash, selector) {
   await page.route("http://local.test/**", fixture);
   await page.goto("http://local.test/");
   await page.waitForSelector(".readiness-hero");
+  if(process.argv.includes("--capacity-only")){
+    await testCapacity(page);
+    await browser.close();
+    console.log("capacity-browser-acceptance=ok");return;
+  }
+
   if(process.argv.includes("--project-loading-only")){
     const errors=[];page.on("pageerror",error=>errors.push(error.message));
     failLive=true;projectDelay=8500;mapDelay=8500;
@@ -459,7 +538,7 @@ async function go(page, hash, selector) {
   assert.strictEqual(await page.locator('#mobile-nav [data-route="status"]').getAttribute("aria-current"), "page");
   assert.strictEqual(
     await page.locator('[data-context="storage"] b').innerText(),
-    "31 / 5000 measurement points · 1%",
+    "0.6 / 1.0 MiB",
   );
   assert(await page.getByRole("button", { name: "Object point" }).isDisabled());
   await go(page, "projects", ".project-list");
