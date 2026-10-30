@@ -1,0 +1,12 @@
+{"type":"FeatureCollection","features":[
+ {"type":"Feature","id":"L-A","properties":{"name":"Line A","material":"PE"},
+  "geometry":{"type":"LineString","coordinates":[[10.0,51.0],[10.0,51.00008989],[10.00014245,51.00008989],[10.00014245,51.0]]}},
+ {"type":"Feature","properties":{},
+  "geometry":{"type":"Point","coordinates":[9.99999943,51.00000027,412.3]}},
+ {"type":"Feature","properties":{"name":"Manhole"},
+  "geometry":{"type":"MultiPoint","coordinates":[[10.0,51.0],[10.0003,51.0002]]}},
+ {"type":"Feature","properties":{"name":"Route B"},
+  "geometry":{"type":"MultiLineString","coordinates":[[[10.001,51.001],[10.0012,51.001]],[[10.002,51.002],[10.0022,51.002],[10.0022,51.0022]]]}},
+ {"type":"Feature","properties":{"name":"Area"},
+  "geometry":{"type":"Polygon","coordinates":[[[10.0,51.0],[10.001,51.0],[10.001,51.001],[10.0,51.0]]]}}
+]}

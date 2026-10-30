@@ -60,10 +60,8 @@ class TestFactoryReset(unittest.TestCase):
     def test_delete_the_tokens(self):
         # Otherwise, you would not come to the surface after setting back.
         cfg.CONFIG["config_token"] = "old"
-        cfg.CONFIG["status_token"] = "old"
         cfg.factory_reset()
         self.assertEqual(cfg.CONFIG["config_token"], "")
-        self.assertEqual(cfg.CONFIG["status_token"], "")
 
     def test_writes_the_file(self):
         self.assertTrue(cfg.factory_reset())
@@ -106,7 +104,8 @@ class TestFactoryReset(unittest.TestCase):
     def test_deletes_all_runtime_sidecars_and_exports(self):
         names = ("tracking.index.json", "tracking.segment-0001.jsonl",
                  "tracking.segment-0002.corrupt", "survey-export-test.ndjson",
-                 "config.pending.json", "config.last_good.json")
+                 "config.pending.json", "config.last_good.json",
+                 "config.json.unreadable", "config.last_good.json.unreadable")
         for name in names:
             with open(name, "w") as saved:
                 saved.write("runtime")

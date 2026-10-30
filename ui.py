@@ -13,26 +13,31 @@ APP_V2 = version_html(r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#111820">
+<meta name="theme-color" media="(prefers-color-scheme: light)" data-theme-surface="surface" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" data-theme-surface="surface" content="#161e24">
 <title>RTK Field App</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111820'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='sans-serif' font-weight='700' font-size='20' fill='white'%3ER%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/app.css?v=ASSET_VERSION">
 </head>
-<body data-page="app-v2">
+<body data-page="app-v2" data-asset-version="ASSET_VERSION">
 <div id="app" class="app-shell" aria-busy="true">
   <a class="skip-link" href="#app-main">Skip to content</a>
   <aside class="app-sidebar" aria-label="Primary navigation">
-    <a class="app-brand" href="/#status"><span class="brand-mark" aria-hidden="true">R</span><span><b>RTK</b><small>Field App</small></span></a>
+    <a class="app-brand" href="/#measure"><span class="brand-mark" aria-hidden="true">R</span><span><b>RTK</b><small>Field App</small></span></a>
     <nav id="desktop-nav" class="primary-nav"></nav>
-    <nav id="desktop-context-nav" class="context-nav" aria-label="Device sections"></nav>
+    <nav id="desktop-context-nav" class="context-nav"></nav>
     <div id="device-summary" class="sidebar-device" aria-live="polite"></div>
   </aside>
   <div class="app-workspace">
     <header class="app-header">
       <div class="view-heading"><div><p id="view-kicker" class="kicker"></p><h1 id="view-title">Status</h1></div></div>
-      <button id="live-state" class="live-state" type="button" aria-live="polite" aria-label="Open receiver status"><span aria-hidden="true"></span><span><b>Connecting</b><small></small></span></button>
+      <button id="live-state" class="live-state" type="button" aria-label="Open receiver status"><span aria-hidden="true"></span><span><b>Connecting</b><small></small></span></button>
+      <button id="sign-out" class="header-action" type="button"><span aria-hidden="true">⎋</span><span class="header-action-label">Sign out</span></button>
     </header>
+    <p id="rtk-announcer" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></p>
+    <p id="rtk-feedback-live" class="visually-hidden" aria-live="polite" aria-atomic="true"></p>
     <main id="app-main" tabindex="-1"><div class="initial-loader"><span></span><p>Loading field state …</p></div></main>
+    <section id="feedback-dock" class="feedback-dock" aria-label="Messages" hidden></section>
   </div>
   <nav id="mobile-nav" class="mobile-nav" aria-label="Primary navigation"></nav>
 </div>
@@ -48,7 +53,8 @@ APP_V2_LOGIN = version_html(r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#111820">
+<meta name="theme-color" media="(prefers-color-scheme: light)" data-theme-surface="hero" content="#111820">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" data-theme-surface="hero" content="#24313a">
 <title>Sign in · RTK Field App</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111820'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='sans-serif' font-weight='700' font-size='20' fill='white'%3ER%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="/app.css?v=ASSET_VERSION">
@@ -61,6 +67,7 @@ APP_V2_LOGIN = version_html(r"""<!doctype html>
     <label class="field"><span>Device code</span><div class="secret-input"><input id="v2-device-code" type="password" required autocomplete="current-password" inputmode="text"><button id="v2-show-code" type="button" aria-pressed="false">Show</button></div></label>
     <button class="btn primary" type="submit">Open Field App</button>
     <p id="v2-login-state" class="muted" role="status" aria-live="polite">The code never leaves this device.</p>
+    <p class="login-fallback"><a href="/setup">Basic setup page (fallback)</a></p>
   </form>
 </main>
 <script defer src="/i18n.js?v=ASSET_VERSION"></script>

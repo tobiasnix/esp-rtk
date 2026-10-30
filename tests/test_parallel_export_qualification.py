@@ -15,14 +15,14 @@ def records(count=1):
     measurement = {"recorded_at": 1, "fix_status": "RTK_FIXED", "satellites": 24,
                    "hdop": 0.6, "quality": {"accepted": True}, "profile_id": "profile-1"}
     return [
-        {"record": "header", "kind": "survey_backup", "schema_version": 4,
+        {"record": "header", "kind": "survey_backup", "schema_version": 5,
          "profiles": [{"id": "profile-1", "limits": {"max_hdop": 1.5}}]},
         {"record": "project", "project": {"id": "project-1", "name": "Test"}},
         {"record": "line", "project_id": "project-1", "line": {
             "id": "line-1", "name": "Test line", "state": "recording",
             "_summary": {"vertex_count": count}, "properties": {}}},
     ] + [{"record": "vertex", "project_id": "project-1", "line_id": "line-1",
-          "coordinate": [10.0, 40.0, 100.0],
+          "coordinate": [1000000000, 4000000000, 100000],
           "measurement": dict(measurement, recorded_at=index + 1)}
          for index in range(count)] + [
         {"record": "footer", "active_project_id": "project-1",
@@ -110,7 +110,7 @@ class TestCompleteExportValidation(unittest.TestCase):
             lambda rows: rows[2].update(project_id="missing"),
             lambda rows: rows[3].update(line_id="missing"),
             lambda rows: rows[3].update(project_id="wrong"),
-            lambda rows: rows[3].update(coordinate=[181, 40, 100]),
+            lambda rows: rows[3].update(coordinate=[18100000000, 4000000000, 100000]),
             lambda rows: rows[3]["measurement"].update(profile_id="missing"),
             lambda rows: rows[3]["measurement"].pop("quality"),
             lambda rows: rows[2]["line"]["_summary"].update(vertex_count=2),
@@ -127,12 +127,38 @@ class TestCompleteExportValidation(unittest.TestCase):
     def test_assets_must_reference_their_own_project_line(self):
         rows = records(0)
         rows.insert(-1, {"record": "asset", "project_id": "project-1", "point": {
-            "id": "asset-1", "line_id": "line-1", "coordinate": [10, 40, 100],
+            "id": "asset-1", "line_id": "line-1", "coordinate": [1000000000, 4000000000, 100000],
             "measurement": records()[3]["measurement"]}})
         self.assertEqual(tool.verify_export(encoded(rows), 1)["points"], 1)
         rows[-2]["point"]["line_id"] = "missing"
         with self.assertRaises(ValueError):
             tool.verify_export(encoded(rows), 1)
+
+    def test_coordinate_rule_follows_the_header_schema(self):
+        def with_schema(schema, coordinate, projected=None):
+            rows = records()
+            rows[0]["schema_version"] = schema
+            rows[3]["coordinate"] = coordinate
+            rows.insert(-1, {"record": "asset", "project_id": "project-1", "point": {
+                "id": "asset-1", "line_id": "line-1", "coordinate": coordinate,
+                "projected_coordinate": projected, "measurement": rows[3]["measurement"]}})
+            return encoded(rows)
+
+        exact = [1000000000, 4000000000, 100000]
+        self.assertEqual(tool.verify_export(with_schema(5, exact, exact), 2)["points"], 2)
+        for schema in (2, 3, 4):
+            self.assertEqual(tool.verify_export(
+                with_schema(schema, [10.0, 40.0, 100.0], [10.0, 40.0, 100.0]), 2)["points"], 2)
+            with self.subTest(schema=schema), self.assertRaises(ValueError):
+                tool.verify_export(with_schema(schema, exact), 2)
+        for coordinate, projected in (
+                ([10.0, 40.0, 100.0], None), ([1000000000.0, 4000000000, 100000], None),
+                ([True, 4000000000, 100000], None), ([1000000000, 9000000001, 100000], None),
+                ([1000000000, 4000000000, 100000001], None), (exact, [10.0, 40.0, 100.0]),
+                (exact, [1000000000, 4000000000, -20000001])):
+            with self.subTest(coordinate=coordinate, projected=projected), \
+                    self.assertRaises(ValueError):
+                tool.verify_export(with_schema(5, coordinate, projected), 2)
 
     def test_unknown_schema_duplicate_json_keys_and_nonfinite_numbers_are_rejected(self):
         rows = records()

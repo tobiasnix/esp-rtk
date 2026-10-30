@@ -32,7 +32,7 @@ class TestBenchmarkExportLoad(unittest.IsolatedAsyncioTestCase):
             tracker.start_line('Synthetic line', 0.2)
             for index in range(1, 66):
                 tracker.add_vertex(parallel_benchmark._synthetic_fix(index), source='automatic')
-            tracker.compact()
+            await tracker.compact_async()
             tracker.point_store.close()
             writer, turns = Writer(), []
 

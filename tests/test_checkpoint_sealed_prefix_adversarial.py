@@ -42,7 +42,7 @@ class TestSealedPrefixAdversarial(unittest.IsolatedAsyncioTestCase):
         self.temporary.cleanup()
 
     def append(self, order, station="STATION-A"):
-        coordinate = [8.0 + order / 10000, 50.0, 100.0]
+        coordinate = [800000000 + order * 10000, 5000000000, 100000]
         self.store.append(order, "line-a", coordinate, {
             "record_order": order, "source": "automatic", "station_id": station,
             "profile_id": "PROFILE-A", "hdop": 0.6, "satellites": 24})
@@ -116,7 +116,7 @@ class TestSealedPrefixAdversarial(unittest.IsolatedAsyncioTestCase):
         await self.probe(accept=True)
         path = Path(self.store._segment_path(self.store.segments[0]))
         original = path.read_bytes()
-        changed = original.replace(b"50.0", b"51.0", 1)
+        changed = original.replace(b"5000000000", b"5100000000", 1)
         self.assertNotEqual(changed, original)
         self.assertEqual(len(changed), len(original))
         for line in changed.splitlines():
@@ -170,7 +170,7 @@ class TestSealedPrefixAdversarial(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         path = Path(self.store._segment_path(self.store.segments[-1]))
         with path.open("ab") as stream:
-            stream.write(b'[2,25,"line-a",')
+            stream.write(b'[3,25,"line-a",')
         before, attempted = self.files(), []
 
         def readonly(filename, mode="r", *args, **kwargs):
@@ -219,7 +219,8 @@ class TestCheckpointRetirementAdversarial(unittest.IsolatedAsyncioTestCase):
         self.tracker.create_project("Protected journal")
         self.tracker.start_line("Line", 0, fix=FIX)
         for index in range(1, 13):
-            self.tracker.add_vertex(dict(FIX, lon=8.0 + index / 10000))
+            self.tracker.add_vertex(dict(FIX, lon=8.0 + index / 10000,
+                                         lon_e8=800000000 + index * 10000))
         self.tracker.point_store.sync()
         self.assertGreater(len(self.tracker.point_store.segments), 2)
 
@@ -345,7 +346,7 @@ class TestCheckpointRetirementAdversarial(unittest.IsolatedAsyncioTestCase):
                 changed[0] = True
                 self.tracker.set_line_state("finish")
                 self.tracker.start_line("New during final yield", 0,
-                                        fix=dict(FIX, lon=9.0))
+                                        fix=dict(FIX, lon=9.0, lon_e8=900000000))
             await asyncio.sleep(0)
 
         with mock.patch.object(self.tracker.point_store, "rewrite_temporary_bytes", capture_selection), \
@@ -357,7 +358,7 @@ class TestCheckpointRetirementAdversarial(unittest.IsolatedAsyncioTestCase):
         rewrite.assert_not_called()
         self.assertEqual(self.tracker.feature_count(), 14)
         self.assertEqual(list(self.tracker._line(self.tracker._project())["coordinates"]),
-                         [[9.0, 50.0, 123.4]])
+                         [[900000000, 5000000000, 123400]])
         self.assert_cold_replay_matches()
 
     async def test_second_failed_checkpoint_with_same_event_order_cannot_expand_retirement(self):
@@ -365,9 +366,9 @@ class TestCheckpointRetirementAdversarial(unittest.IsolatedAsyncioTestCase):
         expected_order = self.tracker._event_sequence
 
         def second_checkpoint():
-            with mock.patch.object(tracking.Tracker, "_load_checkpoint", return_value=0):
-                with self.assertRaises(ValueError):
-                    self.tracker.compact()
+            # What a second checkpoint writes before its verification fails.
+            self.tracker._write_checkpoint()
+            self.tracker._write_index()
             self.assertEqual(self.tracker._event_sequence, expected_order)
 
         await self.mutate_after_verification(second_checkpoint)
@@ -436,7 +437,7 @@ class TestCheckpointRetirementAdversarial(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_old_vertices_are_not_excused_by_later_valid_append(self):
         await self.tracker.compact_async()
-        self.tracker.add_vertex(dict(FIX, lon=9.0))
+        self.tracker.add_vertex(dict(FIX, lon=9.0, lon_e8=900000000))
         self.assert_missing_old_vertices_reject_checkpoint(2)
 
     async def test_readonly_checkpoint_verification_never_promotes_fallback(self):

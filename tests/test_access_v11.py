@@ -5,10 +5,15 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from support import (access, ble, cfg, discovery, fanout, identity, state,
                      web, FakeNVS)
 import assets
+import cfg_store
+
+EPOCH_2000 = 946_684_800
+JUMP_26Y_S = 820_540_800  # 9497 days
 
 
 class TestIdentity(unittest.TestCase):
@@ -85,6 +90,15 @@ class TestSessions(unittest.TestCase):
         self.assertIsNone(access.authenticate(
             cookie, now=100 + access.SESSION_IDLE_SEC + 1))
 
+    def test_session_active_does_not_extend_the_idle_window(self):
+        session, _ = access.login("code", "code", now=100)
+        cookie = "rtk_session=" + session["token"]
+        self.assertTrue(access.session_active(cookie, now=100 + access.SESSION_IDLE_SEC - 1))
+        self.assertTrue(access.session_active(cookie, now=100 + access.SESSION_IDLE_SEC))
+        self.assertFalse(access.session_active(cookie, now=100 + access.SESSION_IDLE_SEC + 1))
+        self.assertFalse(access.session_active("", now=101))
+        self.assertFalse(access.session_active("rtk_session=unknown", now=101))
+
     def test_duration_is_independent_of_ntp_calendar_time(self):
         original_ticks, original_time = access.time.ticks_ms, access.time.time
         try:
@@ -153,7 +167,7 @@ class TestTransportContracts(unittest.TestCase):
                                          "device_code": "gnss-a+b c"})
         self.assertEqual(
             payload,
-            "http://rtk-d4e5f6.local/setup#code=gnss-a%2Bb%20c")
+            "http://rtk-d4e5f6.local/#code=gnss-a%2Bb%20c")
         self.assertNotIn("?code=", payload)
 
     def test_label_contains_both_offline_qr_codes(self):
@@ -172,7 +186,7 @@ class TestTransportContracts(unittest.TestCase):
         self.assertIn('id="portal-qr"', html)
         self.assertIn('<script defer src="/qr.js?v=%s"></script>' % assets.ASSET_VERSION, html)
         self.assertIn("WIFI:T:WPA;S:RTK-D4E5F6-SETUP;P:APSECRET123;;", html)
-        self.assertIn("setup#code=CODE123", html)
+        self.assertIn("/#code=CODE123", html)
         self.assertIn("123456", html)
 
     def test_tcp_standard_and_legacy(self):
@@ -243,6 +257,28 @@ class TestTransportContracts(unittest.TestCase):
         manager.handle_write(manager.rx, conn)
         self.assertEqual(calls, [b"$PQTMVERNO*58"])
 
+    def test_ble_maintenance_window_survives_an_rtc_jump(self):
+        manager = ble.BLEManager("RTK-D4E5F6"); conn = 7
+        manager.connections.add(conn); manager.encrypted_connections.add(conn)
+        calls = []
+        manager.command_sink = lambda value: calls.append(value) or (True, None)
+        previous = cfg.CONFIG.get("ble_commands_enabled")
+        cfg.CONFIG["ble_commands_enabled"] = False
+        self.addCleanup(cfg.CONFIG.__setitem__, "ble_commands_enabled", previous)
+        uptime = [100]
+        with mock.patch.object(ble.app, "uptime_seconds", side_effect=lambda: uptime[0]), \
+                mock.patch.object(ble.time, "time", return_value=EPOCH_2000):
+            self.assertEqual(manager.enable_command_maintenance(600), 600)
+        with mock.patch.object(ble.app, "uptime_seconds", side_effect=lambda: uptime[0]), \
+                mock.patch.object(ble.time, "time", return_value=EPOCH_2000 + JUMP_26Y_S):
+            manager.handle_write(manager.rx, conn, b"$PQTMVERNO*58")
+            uptime[0] = 699
+            manager.handle_write(manager.rx, conn, b"$PQTMVERNO*58")
+            uptime[0] = 700
+            manager.handle_write(manager.rx, conn, b"$PQTMVERNO*58")
+        self.assertEqual(calls, [b"$PQTMVERNO*58"] * 2)
+        self.assertNotIn("ble_commands_until", state.app.stats)
+
     def test_ble_only_sends_nmea_to_encrypted_clients(self):
         manager = ble.BLEManager("RTK-D4E5F6")
         manager.connections.update((7, 8))
@@ -261,6 +297,18 @@ class TestTransportContracts(unittest.TestCase):
         self.assertIn(7, manager.ble.pairings)
         manager._irq(31, (7, 3, 0))
         self.assertEqual(manager.ble.passkeys, [(7, 3, 123456)])
+
+    def test_failed_ble_security_counts_an_auth_failure(self):
+        manager = ble.BLEManager("RTK-D4E5F6")
+        with mock.patch.dict(state.app.stats, {"ble_auth_failures": 0}), \
+                mock.patch.object(ble, "log"):
+            manager.events.extend([("security", (1, False, False, False, 0)),
+                                   ("security", (2, True, False, False, 16))])
+            manager._handle_events()
+            self.assertEqual(state.app.stats["ble_auth_failures"], 2)
+            manager.events.append(("security", (3, True, True, True, 16)))
+            manager._handle_events()
+            self.assertEqual(state.app.stats["ble_auth_failures"], 2)
 
     def test_ble_bond_secrets_are_persisted(self):
         cwd = os.getcwd()
@@ -325,12 +373,24 @@ class TestDiscovery(unittest.TestCase):
             {"sta_ip": "N/A"}, False, "192.168.4.1"))
 
 
+class PowerCut(BaseException):
+    # BaseException on purpose: atomic_dump's `except Exception` cleanup must not run,
+    # exactly as after a real power cut.
+    pass
+
+
 class TestTransactionalConfiguration(unittest.TestCase):
     def setUp(self):
         self.cwd = os.getcwd()
         self.tmp = tempfile.mkdtemp(prefix="esp-rtk-pending-")
         os.chdir(self.tmp)
         self.saved = dict(cfg.CONFIG)
+        self.saved_access_state = state.app.stats.get("access_state")
+        state.app.stats["access_state"] = "ONLINE"
+        cfg._ROLLBACK_OPEN, cfg._ROLLBACK_CODE, cfg._STAGING_UNRECOVERED = False, None, False
+        cfg._STAGING_LOG.reset()       # each test sees the first recovery error
+        cfg._CONFIG_FILE_PROTECTED = False
+        cfg.discard_staged_config()
         cfg.CONFIG["wifi_ssid"] = "Old"
         cfg.CONFIG["wifi_pass"] = "legacy-password"
         cfg.save_config()
@@ -338,11 +398,33 @@ class TestTransactionalConfiguration(unittest.TestCase):
     def tearDown(self):
         cfg.CONFIG.clear()
         cfg.CONFIG.update(self.saved)
+        cfg._ROLLBACK_OPEN, cfg._ROLLBACK_CODE, cfg._STAGING_UNRECOVERED = False, None, False
+        cfg.set_task_reloader(None)
+        cfg.discard_staged_config()
+        state.app.stats["access_state"] = self.saved_access_state
+        cfg._CONFIG_FILE_PROTECTED = False
+        del cfg.CONFIG_WARNINGS[:]
         os.chdir(self.cwd)
 
+    def test_stage_without_apply_changes_nothing_on_disk_or_in_config(self):
+        summary = cfg.stage_config({"wifi_ssid": "New"})
+        self.assertEqual(summary, {"applied": [], "staged": ["wifi_ssid"], "pending": True,
+                                   "restart_required": True,
+                                   "staging_revision": cfg.staging_revision()})
+        self.assertEqual(cfg.configured_networks(), [("Old", "legacy-password")])
+        with open("config.json") as fh:
+            self.assertEqual(json.load(fh)["wifi_ssid"], "Old")
+        self.assertFalse(cfg.pending_config_active())
+        self.assertEqual(cfg.config_result_read()["status"], "none")
+        self.assertEqual(cfg.stage_config({"wifi_ssid": "Old"})["staged"], [])   # reverted
+        self.assertFalse(cfg.config_restart_required())
+
     def test_stage_commit(self):
-        self.assertTrue(cfg.stage_config({"wifi_ssid": "New"}))
+        cfg.stage_config({"wifi_ssid": "New"})
+        self.assertTrue(cfg.apply_staged_config())
         self.assertTrue(cfg.pending_config_active())
+        self.assertEqual(cfg.config_result_read()["status"], "pending")
+        self.assertEqual(cfg.staged_config(), {})
         cfg.commit_pending_config("FieldNetwork")
         self.assertFalse(cfg.pending_config_active())
         self.assertEqual(cfg.config_result_read()["details"]["ssid"], "FieldNetwork")
@@ -350,11 +432,1225 @@ class TestTransactionalConfiguration(unittest.TestCase):
             self.assertEqual(json.load(fh)["wifi_ssid"], "New")
 
     def test_stage_rollback(self):
-        self.assertTrue(cfg.stage_config({"wifi_ssid": "Invalid"}))
-        self.assertTrue(cfg.rollback_pending_config())
+        cfg.stage_config({"wifi_ssid": "Invalid"})
+        self.assertTrue(cfg.apply_staged_config())
+        self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
         self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
         with open("config.json") as fh:
             self.assertEqual(json.load(fh)["wifi_ssid"], "Old")
+
+    def test_apply_live_refuses_verified_and_unknown_keys_and_keeps_config_on_write_errors(self):
+        for bad in ({"wifi_ssid": "X"}, {"no_such_key": 1}):
+            with self.assertRaises(ValueError):
+                cfg.apply_live(bad)
+        before = cfg.CONFIG["ntrip_host"]
+        with mock.patch.object(cfg, "_atomic_dump", return_value=False):
+            self.assertFalse(cfg.apply_live({"ntrip_host": "new.example"}))
+            self.assertIsNone(cfg.stage_config({"ntrip_host": "new.example", "wifi_ssid": "New"}))
+        self.assertEqual(cfg.CONFIG["ntrip_host"], before)
+        self.assertEqual(cfg.staged_config(), {})
+        self.assertFalse(cfg.config_restart_required())
+
+    def _load_with_warning(self, key, raw):
+        with open("config.json") as fh:
+            data = json.load(fh)
+        data[key] = raw
+        with open("config.json", "w") as fh:
+            json.dump(data, fh)
+        cfg.load_config()
+        self.assertEqual([w["key"] for w in cfg.CONFIG_WARNINGS], [key])
+
+    def _assert_repaired(self, key, value):
+        with open("config.json") as fh:
+            self.assertEqual(json.load(fh)[key], value)
+        self.assertEqual(cfg.CONFIG_WARNINGS, [])
+        self.assertEqual(cfg.CONFIG[key], value)
+
+    def test_sent_value_equal_to_the_fallback_repairs_a_warned_key(self):       # #18 x #23a
+        # task_restart (ntrip_port: 70000 -> RAM 2101) and live (antenna_height_m)
+        for key, raw, value in (("ntrip_port", 70000, 2101),
+                                ("antenna_height_m", "abc", cfg.DEFAULT_CONFIG["antenna_height_m"])):
+            with self.subTest(key=key):
+                self._load_with_warning(key, raw)
+                self.assertEqual(cfg.CONFIG[key], value)
+                summary = cfg.stage_config({key: value})
+                self.assertEqual(summary["applied"], [key])
+                self.assertFalse(summary["restart_required"])     # the task runs on the fallback
+                self._assert_repaired(key, value)
+
+    def test_apply_live_with_the_fallback_value_repairs_a_warned_key(self):     # #18 x #23a
+        for key, raw, value in (("ntrip_port", 70000, 2101),
+                                ("antenna_height_m", "abc", cfg.DEFAULT_CONFIG["antenna_height_m"])):
+            with self.subTest(key=key):
+                self._load_with_warning(key, raw)
+                self.assertTrue(cfg.apply_live({key: value}))
+                self.assertFalse(cfg.config_restart_required())
+                self._assert_repaired(key, value)
+
+    def test_unchanged_key_without_a_warning_is_not_saved(self):
+        with mock.patch.object(cfg, "save_config") as save:
+            summary = cfg.stage_config({"ntrip_port": cfg.CONFIG["ntrip_port"]})
+        save.assert_not_called()
+        self.assertEqual(summary["applied"], [])
+
+    def test_recovery_error_of_the_staging_files_is_logged_at_most_once_a_minute(self):  # #23a M-6
+        import cfg_logging
+        clock = [0]
+        throttle = cfg_logging.LogThrottle(cfg_logging.HOT_PATH_LOG_INTERVAL_MS,
+                                           clock=lambda: clock[0])
+        with mock.patch.object(cfg, "_STAGING_LOG", throttle), \
+                mock.patch.object(cfg._store, "recover_staging", return_value=False), \
+                mock.patch.object(cfg, "log") as log:
+            for _ in range(5):
+                self.assertTrue(cfg.pending_config_active())          # still open and blocked
+                clock[0] += 5000
+            errors = [c.args[2] for c in log.call_args_list if c.args[0] == "ERROR"]
+            self.assertEqual(len(errors), 1)
+            clock[0] = 60000
+            self.assertTrue(cfg.pending_config_active())
+            errors = [c.args[2] for c in log.call_args_list if c.args[0] == "ERROR"]
+        self.assertEqual(len(errors), 2)
+        self.assertIn("[4 more since the last report]", errors[1])
+        self.assertTrue(cfg._STAGING_UNRECOVERED)
+
+    def arm(self, changes):
+        cfg.stage_config(changes)
+        self.assertTrue(cfg.apply_staged_config())
+
+    def fresh(self):
+        # New empty working directory with config.json = "Old" (same state as setUp).
+        os.chdir(tempfile.mkdtemp(prefix="esp-rtk-pending-"))
+        cfg.CONFIG.clear(); cfg.CONFIG.update(self.saved)
+        cfg._ROLLBACK_OPEN, cfg._ROLLBACK_CODE, cfg._STAGING_UNRECOVERED = False, None, False
+        cfg.discard_staged_config()
+        cfg.CONFIG["wifi_ssid"], cfg.CONFIG["wifi_pass"] = "Old", "legacy-password"
+        cfg.save_config()
+
+    def boot(self, works=("Old",)):
+        # A restart (assumption A5): RAM gone, load, the import-time resolution (R2a),
+        # then NetworkManager.run: no station attempt while a recorded rollback is
+        # incomplete (R3), otherwise the verdict. Only SSIDs in `works` connect, and
+        # only with the confirmed password "legacy-password".
+        cfg.discard_staged_config()                                                             # so is the staging
+        cfg._ROLLBACK_OPEN, cfg._ROLLBACK_CODE, cfg._STAGING_UNRECOVERED = False, None, False   # RAM is gone
+        cfg.load_config()
+        cfg.resolve_interrupted_apply()
+        if cfg.rollback_incomplete():
+            return
+        if cfg.pending_config_active():
+            if cfg.CONFIG["wifi_ssid"] in works and cfg.CONFIG["wifi_pass"] == "legacy-password":
+                cfg.commit_pending_config(cfg.CONFIG["wifi_ssid"])
+            else:
+                cfg.rollback_pending_config("authentication_failed")
+
+    def cut_at(self, step):
+        # File operation number `step` (os.rename / os.remove inside cfg_store) never happens.
+        calls, real_rename, real_remove = [0], cfg_store.os.rename, cfg_store.os.remove
+        def guarded(real):
+            def operation(*args):
+                calls[0] += 1
+                if calls[0] == step:
+                    raise PowerCut()
+                return real(*args)
+            return operation
+        return mock.patch.multiple(cfg_store.os, rename=guarded(real_rename), remove=guarded(real_remove))
+
+    def fail_writes_to(self, *targets):
+        real = cfg._atomic_dump
+        return mock.patch.object(cfg, "_atomic_dump", side_effect=lambda target, data:
+                                 False if target in targets else real(target, data))
+
+    def test_rollback_writes_failed_with_a_code_and_never_connected(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        statuses = []
+        real = cfg.config_result_write
+        def record(status, message=None, details=None):
+            statuses.append(status)
+            return real(status, message, details)
+        with mock.patch.object(cfg, "config_result_write", side_effect=record):
+            self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
+        self.assertEqual(statuses, ["failed"])
+        result = cfg.config_result_read()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["details"], {"code": "authentication_failed", "restored": ["wifi_ssid"]})
+        self.assertFalse(cfg.pending_config_active())
+        self.assertFalse(os.path.exists(cfg.LAST_GOOD_CONFIG_FILE))
+
+    def test_rollback_code_comes_from_the_last_wifi_error(self):
+        for stats_value, expected in (("access_point_not_found", "access_point_not_found"),
+                                      (None, "connection_lost")):
+            self.arm({"wifi_ssid": "Invalid"})
+            with mock.patch.dict(state.app.stats, {"last_wifi_error": stats_value}):
+                self.assertTrue(cfg.rollback_pending_config())
+            self.assertEqual(cfg.config_result_read()["details"]["code"], expected)
+
+    def test_rollback_restores_only_changed_verified_keys(self):
+        self.arm({"wifi_ssid": "Invalid", "ntrip_host": "new.example"})
+        cfg.save_config({"measurement_min_satellites": 30, "ap_pass": "rotated-at-boot-1"})
+        self.assertTrue(cfg.rollback_pending_config("connection_timeout"))
+        with open("config.json") as fh:
+            stored = json.load(fh)
+        for source in (cfg.CONFIG, stored):
+            self.assertEqual(source["wifi_ssid"], "Old")
+            self.assertEqual(source["ntrip_host"], "new.example")       # task_restart stays
+            self.assertEqual(source["measurement_min_satellites"], 30)  # live stays
+            self.assertEqual(source["ap_pass"], "rotated-at-boot-1")    # not part of the change
+        self.assertEqual(cfg.config_result_read()["details"]["restored"], ["wifi_ssid"])
+
+    def test_power_cut_at_every_rollback_step_never_keeps_the_rejected_candidate(self):
+        for works in (("Old",), ("Old", "Invalid")):   # candidate unreachable / reachable on the next boot
+            step = 1
+            while True:
+                self.fresh()
+                self.arm({"wifi_ssid": "Invalid"})
+                cut = False
+                with self.cut_at(step):
+                    try:
+                        cfg.rollback_pending_config("authentication_failed")
+                    except PowerCut:
+                        cut = True
+                decided = cfg.config_result_read()["status"] == "failed"
+                self.boot(works)
+                with self.subTest(works=works, step=step):
+                    self.assertFalse(cfg.pending_config_active())
+                    if decided or "Invalid" not in works:
+                        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+                        self.assertEqual(cfg.config_result_read()["details"]["code"], "authentication_failed")
+                if not cut:
+                    break
+                step += 1
+        self.assertGreater(step, 3)                     # the cut really walked through the steps
+
+    def test_recorded_decision_is_completed_before_any_connect_even_if_the_candidate_is_reachable(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        # power cut after `failed` was written, before config.json was restored
+        self.assertTrue(cfg.config_result_write("failed", details={"code": "authentication_failed",
+                                                                   "restored": ["wifi_ssid"]}))
+        with mock.patch.object(cfg, "commit_pending_config", wraps=cfg.commit_pending_config) as commit:
+            self.boot(works=("Old", "Invalid"))
+        commit.assert_not_called()
+        self.assertEqual((cfg.CONFIG["wifi_ssid"], cfg.CONFIG["wifi_pass"]), ("Old", "legacy-password"))
+        with open("config.json") as fh:
+            self.assertEqual(json.load(fh)["wifi_ssid"], "Old")
+        self.assertFalse(cfg.pending_config_active())
+        self.assertEqual(cfg.config_result_read()["details"]["code"], "authentication_failed")
+
+    def test_power_cut_after_a_failed_verification_of_an_empty_change_never_confirms(self):
+        for change in ({"ntrip_host": "new.example"}, {}):   # caster only; unchanged /save
+            step = 1
+            while True:
+                self.fresh()
+                self.arm(change)
+                cut = False
+                with self.cut_at(step):
+                    try:
+                        cfg.rollback_pending_config("connection_timeout")   # the router was down
+                    except PowerCut:
+                        cut = True
+                decided = cfg.config_result_read()["status"] == "failed"
+                self.boot()                                   # Old connects again
+                with self.subTest(change=change, step=step):
+                    self.assertFalse(cfg.pending_config_active())
+                    if decided:                               # a recorded decision is never confirmed
+                        self.assertEqual(cfg.config_result_read()["status"], "failed")
+                        self.assertEqual(cfg.config_result_read()["details"]["code"], "connection_timeout")
+                if not cut:
+                    break
+                step += 1
+
+    def test_rollback_keeps_an_existing_failed_result(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        self.assertTrue(cfg.config_result_write("failed", details={"code": "authentication_failed",
+                                                                   "restored": ["wifi_ssid"]}))
+        self.assertTrue(cfg.rollback_pending_config("connection_timeout"))
+        self.assertEqual(cfg.config_result_read()["details"]["code"], "authentication_failed")
+
+    def test_rollback_with_an_unwritable_result_still_restores(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        with self.fail_writes_to(cfg.CONFIG_RESULT_FILE):
+            self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertFalse(cfg.pending_config_active())
+        self.boot()                                       # stale `pending` without pending file
+        self.assertEqual(cfg.config_result_read()["details"],
+                         {"code": "apply_interrupted", "restored": []})
+
+    def test_unwritable_config_leaves_an_incomplete_rollback_that_the_next_boot_completes(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        with self.fail_writes_to("config.json"):
+            self.assertFalse(cfg.rollback_pending_config("authentication_failed"))
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Invalid")
+        self.assertTrue(cfg.rollback_incomplete())
+        self.boot(works=("Old", "Invalid"))
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertFalse(cfg.rollback_incomplete())
+        self.assertEqual(cfg.config_result_read()["details"]["code"], "authentication_failed")
+
+    def test_unremovable_pending_keeps_the_rollback_incomplete(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        real_remove = cfg_store.os.remove
+        def refuse_pending(target):
+            if target == cfg.PENDING_CONFIG_FILE:
+                raise OSError(5, "EIO")
+            return real_remove(target)
+        with mock.patch.object(cfg_store.os, "remove", side_effect=refuse_pending):
+            self.assertFalse(cfg.rollback_pending_config("authentication_failed"))
+        self.assertTrue(os.path.exists(cfg.LAST_GOOD_CONFIG_FILE))   # kept while pending exists
+        self.assertTrue(cfg.rollback_incomplete())
+        self.assertTrue(cfg.complete_rollback())                     # removal works again
+        self.assertFalse(cfg.rollback_incomplete())
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+
+    def test_complete_rollback_verifies_the_written_config_and_is_idempotent(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        self.assertTrue(cfg.config_result_write("failed", details={"code": "authentication_failed",
+                                                                   "restored": ["wifi_ssid"]}))
+        real = cfg._atomic_dump
+        with mock.patch.object(cfg, "_atomic_dump", side_effect=lambda target, data:
+                               True if target == "config.json" else real(target, data)):
+            self.assertFalse(cfg.complete_rollback())                # claimed write, nothing on disk
+        self.assertTrue(cfg.rollback_incomplete())
+        self.assertTrue(cfg.complete_rollback())
+        self.assertTrue(cfg.complete_rollback())                     # nothing left: still True
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+
+    def test_rollback_stays_open_in_ram_when_failed_cannot_be_written(self):     # I2
+        self.arm({"wifi_ssid": "Invalid"})
+        with self.fail_writes_to(cfg.CONFIG_RESULT_FILE, "config.json"):
+            self.assertFalse(cfg.rollback_pending_config("authentication_failed"))
+            self.assertEqual(cfg.config_result_read()["status"], "pending")   # nothing persisted
+            self.assertFalse(cfg.rollback_incomplete())                        # the file view misses it
+            self.assertTrue(cfg.rollback_open())                               # the RAM view does not
+            self.assertFalse(cfg.retry_rollback())
+            self.assertTrue(cfg.rollback_open())
+        self.assertTrue(cfg.retry_rollback())                                  # writes work again
+        self.assertFalse(cfg.rollback_open())
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertEqual(cfg.config_result_read()["details"]["code"], "authentication_failed")
+
+    def test_recovery_error_never_raises_and_counts_as_an_open_change(self):    # I3, cfg side
+        self.arm({"wifi_ssid": "Invalid"})
+        os.rename(cfg.PENDING_CONFIG_FILE, cfg.PENDING_CONFIG_FILE + ".tmp")   # target lost, valid .tmp
+        real_rename = cfg_store.os.rename
+        def eio(src, dst):
+            if src.endswith(".tmp"):
+                raise OSError(5, "EIO")
+            return real_rename(src, dst)
+        with mock.patch.object(cfg_store.os, "rename", side_effect=eio):
+            self.assertIsInstance(cfg.resolve_interrupted_apply(), bool)        # import-time call: no raise
+            self.assertTrue(cfg.pending_config_active())
+            self.assertTrue(cfg.rollback_open())
+            self.assertFalse(cfg.retry_rollback())
+            self.assertTrue(os.path.exists(cfg.PENDING_CONFIG_FILE + ".tmp"))
+            self.assertTrue(os.path.exists(cfg.LAST_GOOD_CONFIG_FILE))
+        self.assertTrue(cfg.retry_rollback())                                  # recovery works again
+        self.assertFalse(cfg.rollback_open())
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertEqual(cfg.config_result_read()["details"]["code"], "storage_error")
+
+    def test_commit_result_write_failure_keeps_the_files_for_the_next_boot(self):
+        self.arm({"wifi_ssid": "New"})
+        with self.fail_writes_to(cfg.CONFIG_RESULT_FILE):
+            self.assertFalse(cfg.commit_pending_config("New"))
+        self.assertTrue(cfg.pending_config_active())
+        self.boot(works=("New",))
+        self.assertEqual(cfg.config_result_read()["details"], {"ssid": "New"})
+        self.assertFalse(cfg.pending_config_active())
+
+    def test_commit_of_an_unlanded_change_records_apply_interrupted(self):
+        self.arm({"wifi_ssid": "New"})
+        with open("config.json", "w") as fh:                  # the candidate never reached config.json
+            json.dump(dict(cfg._persisted_config(), wifi_ssid="Old"), fh)
+        self.boot()
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertFalse(cfg.pending_config_active())
+        self.assertEqual(cfg.config_result_read()["details"],
+                         {"code": "apply_interrupted", "restored": []})
+
+    def test_a_stale_pending_result_without_pending_file_resolves_to_failed(self):
+        self.assertTrue(cfg.config_result_write("pending"))
+        self.assertTrue(cfg.resolve_interrupted_apply())
+        result = cfg.config_result_read()
+        self.assertEqual((result["status"], result["details"]),
+                         ("failed", {"code": "apply_interrupted", "restored": []}))
+        self.assertFalse(cfg.resolve_interrupted_apply())      # nothing left to resolve
+
+    def test_setup_mode_rollback_restores_the_confirmed_network(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        self.assertTrue(cfg.rollback_pending_config("setup_mode"))
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertEqual(cfg.config_result_read()["details"], {"code": "setup_mode", "restored": ["wifi_ssid"]})
+
+    def test_lost_pending_target_is_recovered_before_the_check(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        os.rename(cfg.PENDING_CONFIG_FILE, cfg.PENDING_CONFIG_FILE + ".previous")
+        self.assertTrue(cfg.pending_config_active())
+        self.assertTrue(os.path.exists(cfg.PENDING_CONFIG_FILE))
+
+    def test_unreadable_last_good_ends_the_transaction_without_a_restore(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        with open(cfg.LAST_GOOD_CONFIG_FILE, "w") as fh: fh.write("{broken")
+        self.assertTrue(cfg.rollback_pending_config("connection_timeout"))
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Invalid")       # nothing to restore from (E4)
+        self.assertFalse(cfg.pending_config_active())
+        self.assertEqual(cfg.config_result_read()["details"], {"code": "connection_timeout", "restored": []})
+
+    def test_unreadable_pending_restores_every_verified_key_from_last_good(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        with open(cfg.PENDING_CONFIG_FILE, "w") as fh: fh.write("{broken")
+        self.assertTrue(cfg.rollback_pending_config("connection_timeout"))
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertIn("wifi_ssid", cfg.config_result_read()["details"]["restored"])
+
+    def test_v15_10_2_pending_files_still_commit_and_roll_back(self):
+        old = cfg._persisted_config()
+        new = dict(old, wifi_ssid="New", ntrip_host="new.example")
+        for path, data in (("config.json", new), (cfg.PENDING_CONFIG_FILE, new),
+                           (cfg.LAST_GOOD_CONFIG_FILE, old),
+                           (cfg.CONFIG_RESULT_FILE, {"schema_version": 2, "status": "pending",
+                                                     "details": {}, "uptime_sec": 1800000000})):
+            with open(path, "w") as fh: json.dump(data, fh)
+        cfg.load_config()
+        self.assertTrue(cfg.pending_config_active())
+        self.assertEqual(cfg.config_result_read()["status"], "pending")
+        self.assertTrue(cfg.rollback_pending_config("access_point_not_found"))
+        self.assertEqual((cfg.CONFIG["wifi_ssid"], cfg.CONFIG["ntrip_host"]), ("Old", "new.example"))
+        for path, data in (("config.json", new), (cfg.PENDING_CONFIG_FILE, new),
+                           (cfg.LAST_GOOD_CONFIG_FILE, old),
+                           (cfg.CONFIG_RESULT_FILE, {"schema_version": 2, "status": "pending",
+                                                     "details": {}, "uptime_sec": 1800000000})):
+            with open(path, "w") as fh: json.dump(data, fh)        # a second, separate V15.10.2 transaction
+        cfg.load_config()
+        self.assertTrue(cfg.commit_pending_config("New"))
+        self.assertEqual(cfg.config_result_read()["details"], {"ssid": "New"})
+        self.assertFalse(cfg.pending_config_active())
+
+    def result_tmp_fault(self):
+        # The result file lost its target mid-rename; renaming its valid .tmp back fails with EIO.
+        os.rename(cfg.CONFIG_RESULT_FILE, cfg.CONFIG_RESULT_FILE + ".tmp")
+        real = cfg_store.os.rename
+
+        def eio(src, dst):
+            if src == cfg.CONFIG_RESULT_FILE + ".tmp":
+                raise OSError(5, "EIO")
+            return real(src, dst)
+        return mock.patch.object(cfg_store.os, "rename", side_effect=eio)
+
+    def test_unrecoverable_result_file_is_read_from_its_candidate_and_never_raises(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        with self.result_tmp_fault():
+            self.assertEqual(cfg.config_result_read()["status"], "pending")
+            self.assertFalse(cfg.resolve_interrupted_apply())
+            self.assertFalse(cfg._STAGING_UNRECOVERED)              # the result file alone never blocks
+            self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertFalse(cfg.rollback_open())
+
+    def test_commit_with_a_stored_failed_completes_the_rollback_but_never_confirms(self):  # M-7
+        self.arm({"wifi_ssid": "New"})
+        self.assertTrue(cfg.config_result_write("failed", details={"code": "authentication_failed",
+                                                                   "restored": ["wifi_ssid"]}))
+        self.assertFalse(cfg.commit_pending_config("New"))
+        self.assertFalse(cfg.pending_config_active())                 # the rollback completed
+        self.assertFalse(cfg.rollback_open())
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertEqual(cfg.config_result_read()["status"], "failed")
+
+    def test_commit_of_an_unlanded_change_never_confirms(self):                     # M-7
+        self.arm({"wifi_ssid": "New"})
+        with open("config.json", "w") as fh:
+            json.dump(dict(cfg._persisted_config(), wifi_ssid="Old"), fh)
+        cfg.load_config()                                     # as on the verification boot
+        self.assertFalse(cfg.commit_pending_config("New"))
+        self.assertFalse(cfg.rollback_open())
+        self.assertEqual(cfg.config_result_read()["details"]["code"], "apply_interrupted")
+
+    def test_commit_never_confirms_with_an_unreadable_result(self):
+        self.arm({"wifi_ssid": "New"})
+        os.remove(cfg.CONFIG_RESULT_FILE)
+        real = cfg_store.recover_atomic
+
+        def broken(path):
+            if path == cfg.CONFIG_RESULT_FILE:
+                raise OSError(5, "EIO")
+            return real(path)
+        with mock.patch.object(cfg_store, "recover_atomic", side_effect=broken):
+            self.assertEqual(cfg.config_result_read()["status"], "unknown")
+            self.assertFalse(cfg.commit_pending_config("New"))
+        self.assertTrue(cfg.pending_config_active())
+        self.assertTrue(cfg.rollback_open())
+        self.assertEqual(cfg.config_result_read()["status"], "none")   # nothing was confirmed
+
+    def test_unreadable_result_with_a_pending_file_counts_as_an_open_rollback(self):
+        self.arm({"wifi_ssid": "New"})
+        os.remove(cfg.CONFIG_RESULT_FILE)
+        real = cfg_store.recover_atomic
+
+        def broken(path):
+            if path == cfg.CONFIG_RESULT_FILE:
+                raise OSError(5, "EIO")
+            return real(path)
+        with mock.patch.object(cfg_store, "recover_atomic", side_effect=broken):
+            self.assertEqual(cfg.config_result_read()["status"], "unknown")
+            self.assertTrue(cfg.rollback_incomplete())          # as commit: never treated as settled
+        self.assertFalse(cfg.rollback_incomplete())             # readable again: just pending
+        cfg.rollback_pending_config("authentication_failed")
+        with mock.patch.object(cfg_store, "recover_atomic", side_effect=broken):
+            self.assertFalse(cfg.rollback_incomplete())         # no pending file: nothing open
+
+    def test_an_existing_but_unreadable_result_is_unknown_never_none(self):
+        self.assertEqual(cfg.config_result_read()["status"], "none")   # no result file at all
+        for damage in ("invalid_json", "eio"):
+            with self.subTest(damage=damage):
+                self.fresh()
+                self.arm({"wifi_ssid": "New"})
+                self.assertTrue(cfg.config_result_write("failed", details={"code": "authentication_failed",
+                                                                           "restored": ["wifi_ssid"]}))
+                patches = []
+                if damage == "invalid_json":
+                    with open(cfg.CONFIG_RESULT_FILE, "w") as fh: fh.write("{broken")
+                else:
+                    real_open = open
+
+                    def eio_open(path, *args, **kwargs):
+                        if path == cfg.CONFIG_RESULT_FILE:
+                            raise OSError(5, "EIO")
+                        return real_open(path, *args, **kwargs)
+                    patches.append(mock.patch("builtins.open", side_effect=eio_open))
+                for patcher in patches: patcher.start()
+                try:
+                    self.assertEqual(cfg.config_result_read()["status"], "unknown")
+                    self.assertTrue(cfg.rollback_incomplete())
+                    self.assertFalse(cfg.commit_pending_config("New"))  # never confirms the candidate
+                finally:
+                    for patcher in patches: patcher.stop()
+                self.assertTrue(cfg.pending_config_active())
+                self.assertTrue(cfg.rollback_open())
+                self.assertNotEqual(cfg.config_result_read()["status"], "connected")
+
+    def test_unreadable_result_is_served_as_pending_never_as_a_failure(self):
+        # The current UI reports every final status except "connected" as
+        # "Configuration failed; the previous working settings were restored."
+        self.arm({"wifi_ssid": "New"})
+        os.remove(cfg.CONFIG_RESULT_FILE)
+        real = cfg_store.recover_atomic
+
+        def broken(path):
+            if path == cfg.CONFIG_RESULT_FILE:
+                raise OSError(5, "EIO")
+            return real(path)
+        with mock.patch.object(cfg_store, "recover_atomic", side_effect=broken), \
+                mock.patch.object(web, "_admin_allowed", return_value=True):
+            self.assertEqual(cfg.config_result_read()["status"], "unknown")
+            writer = FakeHttpWriter()
+            asyncio.run(web._handle_diagnostics_request(writer, "/api/config-result", "", False, {}))
+            served = json.loads(bytes(writer.data).partition(b"\r\n\r\n")[2])
+        self.assertEqual((served["status"], served["details"]), ("pending", {"code": "result_unreadable"}))
+        self.assertEqual(cfg.config_result_read()["status"], "none")   # serving it wrote nothing
+
+    def test_a_failing_decision_record_never_stops_the_restore(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        with mock.patch.object(cfg, "config_result_write", side_effect=RuntimeError("boom")):
+            self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertFalse(cfg.pending_config_active())
+        self.assertFalse(cfg.rollback_open())
+
+    def test_unrecoverable_last_good_without_a_pending_file_never_overwrites_connected(self):
+        self.assertTrue(cfg.config_result_write("connected", details={"ssid": "Old"}))
+        with open(cfg.LAST_GOOD_CONFIG_FILE + ".tmp", "w") as fh:
+            json.dump(cfg._persisted_config(), fh)
+        real = cfg_store.os.rename
+
+        def eio(src, dst):
+            if src == cfg.LAST_GOOD_CONFIG_FILE + ".tmp":
+                raise OSError(5, "EIO")
+            return real(src, dst)
+        with mock.patch.object(cfg_store.os, "rename", side_effect=eio):
+            cfg.resolve_interrupted_apply()
+            self.assertTrue(cfg.rollback_open())                    # a staging file is unrecovered
+            self.assertFalse(cfg.retry_rollback())
+        self.assertEqual(cfg.config_result_read()["details"], {"ssid": "Old"})
+        self.assertTrue(cfg.retry_rollback())                       # recovered, nothing to roll back
+        self.assertFalse(cfg.rollback_open())
+        self.assertEqual(cfg.config_result_read()["details"], {"ssid": "Old"})
+
+    def test_rollback_open_checks_the_files_before_the_flags(self):
+        self.arm({"wifi_ssid": "Invalid"})
+        os.rename(cfg.PENDING_CONFIG_FILE, cfg.PENDING_CONFIG_FILE + ".tmp")
+        real = cfg_store.os.rename
+
+        def eio(src, dst):
+            if src == cfg.PENDING_CONFIG_FILE + ".tmp":
+                raise OSError(5, "EIO")
+            return real(src, dst)
+        with mock.patch.object(cfg_store.os, "rename", side_effect=eio):
+            self.assertTrue(cfg.rollback_open())        # the first look already sees the failure
+        self.assertFalse(cfg.rollback_open())           # recovered, nothing decided: no stale block
+        self.assertTrue(cfg.pending_config_active())
+
+    def call_config(self, path, method="POST", body=b""):
+        writer, reboots = FakeHttpWriter(), []
+
+        async def fake_reboot():
+            reboots.append(path)
+        with mock.patch.object(web, "_admin_allowed", return_value=True), \
+                mock.patch.object(web, "do_soft_reboot_deferred", fake_reboot):
+            asyncio.run(web._handle_config_request(writer, path, method, "", body, False, {}))
+        raw = bytes(writer.data)
+        head, _, payload = raw.partition(b"\r\n\r\n")
+        return head.split(b"\r\n", 1)[0], payload, reboots
+
+    def call_settings(self, handler, body):
+        writer = FakeHttpWriter()
+        with mock.patch.object(web, "_admin_allowed", return_value=True), \
+                mock.patch.object(web.app, "reevaluate_gate"):
+            asyncio.run(handler(writer, "PUT", body, False, {}))
+        return bytes(writer.data).split(b"\r\n", 1)[0]
+
+    def unreadable(self, raw=b"{ torn"):
+        with open("config.json", "wb") as fh:
+            fh.write(raw)
+        cfg.load_config()
+        self.assertTrue(cfg.config_file_protected())
+        return raw
+
+    def file_bytes(self):
+        with open("config.json", "rb") as fh:
+            return fh.read()
+
+    def call_live(self, handler, method, body):
+        writer = FakeHttpWriter()
+        with mock.patch.object(web, "_admin_allowed", return_value=True), \
+                mock.patch.object(web.app, "reevaluate_gate"):
+            asyncio.run(handler(writer, method, body, False, {}))
+        head, _, payload = bytes(writer.data).partition(b"\r\n\r\n")
+        return head.split(b"\r\n", 1)[0], payload
+
+    def test_live_puts_are_refused_while_config_json_is_unreadable(self):        # I-A
+        raw = self.unreadable()
+        before = dict(cfg.CONFIG)
+        gate = json.dumps(dict(web.measurement_gate(), min_satellites=30)).encode()
+        for handler, method, body in (
+                (web._handle_measurement_gate_request, "PUT", gate),
+                (web._handle_measurement_gate_request, "DELETE", b""),
+                (web._handle_field_setup_request, "PUT", b'{"antenna_height_m": 1.8}'),
+                (web._handle_tcp_auth_request, "PUT", b'{"required": false}')):
+            with self.subTest(handler=handler.__name__, method=method):
+                status, payload = self.call_live(handler, method, body)
+                self.assertIn(b"503", status)
+                self.assertEqual(json.loads(payload)["error"], "config_file_unreadable")
+                self.assertEqual(cfg.CONFIG, before)
+                self.assertEqual(self.file_bytes(), raw)
+                self.assertTrue(cfg.config_file_protected())
+
+    def test_a_non_deliberate_live_save_never_releases_the_protection(self):     # I-A
+        raw = self.unreadable()
+        before = dict(cfg.CONFIG)
+        self.assertFalse(cfg.apply_live({"measurement_min_satellites": 9}))
+        self.assertEqual(cfg.CONFIG, before)
+        self.assertEqual(self.file_bytes(), raw)
+        self.assertTrue(cfg.config_file_protected())
+
+    def test_a_wifi_only_put_keeps_the_protection(self):                         # I-A
+        raw = self.unreadable()
+        status, _payload, _ = self.call_config("/api/config", "PUT",
+                                               json.dumps({"wifi_ssid": "New"}).encode())
+        self.assertIn(b"202", status)
+        self.assertEqual(self.file_bytes(), raw)
+        self.assertTrue(cfg.config_file_protected())
+
+    def test_a_config_put_with_caster_keys_releases_the_protection(self):        # I-A
+        self.unreadable()
+        status, _payload, _ = self.call_config("/api/config", "PUT",
+                                               json.dumps({"ntrip_host": "new.example"}).encode())
+        self.assertIn(b"202", status)
+        self.assertFalse(cfg.config_file_protected())
+        with open("config.json") as fh:
+            self.assertEqual(json.load(fh)["ntrip_host"], "new.example")
+
+    def test_the_protection_is_listed_in_config_warnings_until_released(self):    # M-2
+        self.unreadable()
+        entries = [w for w in cfg.CONFIG_WARNINGS if w["key"] == "config_file"]
+        self.assertEqual(len(entries), 1)
+        self.assertIn("config.json", entries[0]["message"])
+        self.assertIs(web.CONFIG_WARNINGS, cfg.CONFIG_WARNINGS)    # /status, /api/ui/live
+        self.assertIsNotNone(cfg.stage_config({"ntrip_host": "new.example"}))
+        self.assertEqual([w for w in cfg.CONFIG_WARNINGS if w["key"] == "config_file"], [])
+
+    def test_a_failed_deliberate_write_protects_the_file_again(self):           # M-1
+        raw = self.unreadable()
+        with mock.patch.object(cfg_store, "atomic_dump", return_value=False):
+            self.assertIsNone(cfg.stage_config({"ntrip_host": "new.example"}))
+        self.assertTrue(cfg.config_file_protected())
+        self.assertEqual([w["key"] for w in cfg.CONFIG_WARNINGS], ["config_file"])
+        self.assertEqual(self.file_bytes(), raw)
+        cfg.stage_config({"wifi_ssid": "New"})
+        real = cfg_store.atomic_dump
+        with mock.patch.object(cfg_store, "atomic_dump",
+                               side_effect=lambda t, d, l: t != "config.json" and real(t, d, l)):
+            self.assertFalse(cfg.apply_staged_config())         # arm fails at config.json
+        self.assertTrue(cfg.config_file_protected())
+        self.assertEqual(self.file_bytes(), raw)
+        with mock.patch.object(cfg_store, "atomic_dump", return_value=False):
+            self.assertFalse(cfg.factory_reset())
+        self.assertTrue(cfg.config_file_protected())
+        self.assertEqual(self.file_bytes(), raw)
+
+    def test_a_rollback_over_an_unreadable_file_writes_the_whole_last_good(self):  # M-3
+        cfg.CONFIG["ntrip_host"] = "caster.example"
+        cfg.CONFIG["measurement_min_satellites"] = 12
+        self.assertTrue(cfg.save_config())
+        self.arm({"wifi_ssid": "New"})
+        with open(cfg.LAST_GOOD_CONFIG_FILE) as fh:
+            last_good = json.load(fh)
+        # Verification boot: config.json became unreadable, RAM holds the defaults.
+        cfg.CONFIG.clear(); cfg.CONFIG.update(cfg.DEFAULT_CONFIG)
+        raw = self.unreadable()
+        self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
+        with open("config.json") as fh:
+            stored = json.load(fh)
+        self.assertEqual(stored, last_good)
+        for key in ("wifi_ssid", "wifi_pass", "ntrip_host", "measurement_min_satellites"):
+            self.assertEqual(cfg.CONFIG[key], last_good[key], key)
+        self.assertEqual((cfg.CONFIG["wifi_ssid"], cfg.CONFIG["ntrip_host"]), ("Old", "caster.example"))
+        self.assertFalse(cfg.config_file_protected())
+        self.assertEqual([w for w in cfg.CONFIG_WARNINGS if w["key"] == "config_file"], [])
+        self.assertFalse(cfg.pending_config_active())
+        self.assertFalse(cfg.rollback_open())
+        with open("config.json.unreadable", "rb") as fh:
+            self.assertEqual(fh.read(), raw)
+
+    def test_a_rollback_over_a_configuration_read_in_place_keeps_live_changes(self):
+        # Codex r5: recovery failed but .previous was read in place - RAM holds
+        # real settings, so only the changed Wi-Fi keys go back.
+        self.arm({"wifi_ssid": "New"})
+        cfg.CONFIG["measurement_min_satellites"] = 13               # a live change after arming
+        with open("config.json") as fh:
+            current = json.load(fh)
+        current["measurement_min_satellites"] = 13
+        os.remove("config.json")
+        with open("config.json.previous", "w") as fh:
+            json.dump(current, fh)
+        with mock.patch.object(cfg_store, "recover_atomic", side_effect=OSError(5, "EIO")):
+            cfg.load_config()
+        self.assertTrue(cfg.config_file_protected())
+        self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
+        with open("config.json") as fh:
+            stored = json.load(fh)
+        self.assertEqual(stored["wifi_ssid"], "Old")                  # rolled back
+        self.assertEqual(stored["measurement_min_satellites"], 13)    # live change kept
+        self.assertEqual(cfg.CONFIG["measurement_min_satellites"], 13)
+        self.assertFalse(cfg.config_file_protected())
+        self.assertFalse(cfg.rollback_open())
+
+    def test_a_failed_rollback_write_keeps_the_protection(self):                   # M-3
+        self.arm({"wifi_ssid": "New"})
+        raw = self.unreadable()
+        real = cfg_store.atomic_dump
+        with mock.patch.object(cfg_store, "atomic_dump",
+                               side_effect=lambda t, d, l: t != "config.json" and real(t, d, l)):
+            self.assertFalse(cfg.rollback_pending_config("authentication_failed"))
+        self.assertTrue(cfg.config_file_protected())
+        self.assertTrue(cfg.rollback_open())
+        self.assertEqual(self.file_bytes(), raw)
+
+    def test_no_open_rollback_never_releases_the_protection(self):                 # M-3
+        self.unreadable()
+        self.assertTrue(cfg.complete_rollback())                 # nothing to restore
+        self.assertTrue(cfg.config_file_protected())
+
+    def test_rollback_keeps_live_changes_made_before_and_after_apply(self):
+        self.call_config("/api/config", "PUT", json.dumps({"wifi_ssid": "Invalid"}).encode())
+        gate = dict(web.measurement_gate(), min_satellites=30)
+        self.assertIn(b"200", self.call_settings(web._handle_measurement_gate_request,
+                                                 json.dumps(gate).encode()))
+        self.assertIn(b"202", self.call_config("/api/config/apply", body=b"{}")[0])
+        cfg.load_config()                                    # the apply restart
+        self.assertIn(b"200", self.call_settings(web._handle_field_setup_request,
+                                                 b'{"antenna_height_m": 1.8}'))
+        self.assertIn(b"200", self.call_settings(web._handle_tcp_auth_request, b'{"required": false}'))
+        self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
+        with open("config.json") as fh:
+            stored = json.load(fh)
+        for source in (cfg.CONFIG, stored):
+            self.assertEqual(source["wifi_ssid"], "Old")
+            self.assertEqual(source["measurement_min_satellites"], 30)
+            self.assertEqual(source["antenna_height_m"], 1.8)
+            self.assertFalse(source["nmea_tcp_auth_required"])
+        self.assertEqual(cfg.config_result_read()["details"],
+                         {"code": "authentication_failed", "restored": ["wifi_ssid"]})
+
+    def test_ntrip_only_change_is_saved_now_and_applied_by_a_verified_restart(self):
+        status, payload, reboots = self.call_config(
+            "/api/config", "PUT", json.dumps({"wifi_ssid": "Old", "ntrip_host": "new.example"}).encode())
+        self.assertIn(b"202", status)
+        self.assertEqual(json.loads(payload), {"pending": False, "restart_required": True,
+                                               "applied": ["ntrip_host"], "staged": [],
+                                               "staging_revision": cfg.staging_revision()})
+        with open("config.json") as fh:
+            self.assertEqual(json.load(fh)["ntrip_host"], "new.example")
+        self.assertFalse(cfg.pending_config_active())
+        status, payload, reboots = self.call_config("/api/config/apply", body=b"{}")
+        self.assertIn(b"202", status)
+        self.assertEqual(reboots, ["/api/config/apply"])
+        self.assertTrue(cfg.pending_config_active())
+        self.assertEqual(cfg.config_result_read()["status"], "pending")
+        cfg.commit_pending_config("Old")
+        self.assertEqual(cfg.config_result_read()["status"], "connected")
+
+    # --- #23 part b: saved caster settings handed to the running NTRIP client ---
+
+    def reloader(self, *results):
+        """Register a task reloader answering with results in turn (the last one repeats).
+
+        An exception instance is raised instead of returned; self.reloads counts calls.
+        """
+        self.reloads = []
+
+        def reload():
+            result = results[min(len(self.reloads), len(results) - 1)]
+            self.reloads.append(result)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        cfg.set_task_reloader(reload)
+
+    def full_rollback_setup(self):
+        # The situation of test_a_rollback_over_an_unreadable_file_writes_the_whole_last_good.
+        cfg.CONFIG["ntrip_host"] = "caster.example"
+        self.assertTrue(cfg.save_config())
+        self.arm({"wifi_ssid": "New"})
+        cfg.CONFIG.clear(); cfg.CONFIG.update(cfg.DEFAULT_CONFIG)
+        self.unreadable()
+
+    def test_caster_change_reloads_the_running_client_without_a_restart(self):
+        seen = []
+
+        def reload():
+            with open("config.json") as fh:
+                seen.append(json.load(fh)["ntrip_host"])
+            return True
+        cfg.set_task_reloader(reload)
+        summary = cfg.stage_config({"ntrip_host": "new.example"})
+        self.assertEqual(seen, ["new.example"])                    # after the durable save
+        self.assertEqual((summary["applied"], summary["restart_required"]), (["ntrip_host"], False))
+        self.assertFalse(cfg.config_restart_required())
+        cfg.stage_config({"ntrip_host": "new.example"})            # unchanged: no second reload
+        cfg.apply_live({"antenna_height_m": 1.5})                  # live key: no reload
+        self.assertEqual(len(seen), 1)
+
+    def test_failed_save_never_reloads(self):
+        self.reloader(True)
+        before = cfg.CONFIG["ntrip_host"]
+        with mock.patch.object(cfg, "_atomic_dump", return_value=False):
+            self.assertFalse(cfg.apply_live({"ntrip_host": "new.example"}))
+        self.assertEqual(self.reloads, [])
+        self.assertEqual(cfg.CONFIG["ntrip_host"], before)
+        self.assertFalse(cfg.config_restart_required())
+
+    def test_reloader_failure_falls_back_to_a_restart(self):
+        for result in (False, RuntimeError("synthetic reload failure")):
+            with self.subTest(result=result):
+                self.fresh()
+                self.reloader(result)
+                with mock.patch.object(cfg, "log") as log:
+                    status, payload, _ = self.call_config(
+                        "/api/config", "PUT", json.dumps({"ntrip_host": "new.example"}).encode())
+                errors = [c.args for c in log.call_args_list if c.args[0] == "ERROR"]
+                self.assertEqual(len(self.reloads), 1)
+                self.assertIn(b"202", status)
+                self.assertTrue(json.loads(payload)["restart_required"])
+                self.assertTrue(cfg.config_restart_required())
+                if isinstance(result, BaseException):
+                    self.assertEqual(errors, [("ERROR", "SYS",
+                                               "NTRIP reload failed: synthetic reload failure")])
+                else:
+                    self.assertEqual(errors, [])
+                status, _, reboots = self.call_config("/api/config/apply", body=b"{}")
+                self.assertIn(b"202", status)                  # the verified restart of #23a
+                self.assertEqual(reboots, ["/api/config/apply"])
+                self.assertTrue(cfg.pending_config_active())
+
+    def test_a_successful_reload_clears_an_earlier_failed_handover(self):  # Codex 5
+        self.reloader(False, True)
+        cfg.stage_config({"ntrip_host": "a.example"})
+        self.assertTrue(cfg.config_restart_required())
+        summary = cfg.stage_config({"ntrip_mount": "B"})
+        self.assertFalse(summary["restart_required"])
+        self.assertFalse(cfg.config_restart_required())
+        self.assertEqual(self.reloads, [False, True])          # exactly one successful handover
+
+    def test_a_successful_reload_clears_an_earlier_failed_handover_over_http(self):  # Codex 5
+        self.reloader(False, True)
+        status, _, _ = self.call_config("/api/config", "PUT",
+                                        json.dumps({"ntrip_host": "a.example"}).encode())
+        self.assertIn(b"202", status)
+        status, payload, _ = self.call_config("/api/config", "PUT",
+                                              json.dumps({"ntrip_mount": "B"}).encode())
+        self.assertIn(b"200", status)
+        self.assertFalse(json.loads(payload)["restart_required"])
+        status, payload, reboots = self.call_config("/api/config/apply", body=b"{}")
+        self.assertIn(b"409", status)
+        self.assertIn(b"nothing_to_apply", payload)
+        self.assertEqual(reboots, [])
+
+    def test_a_successful_reload_keeps_the_restart_of_a_staged_wifi(self):  # Codex 5
+        status, _, _ = self.call_config("/api/config", "PUT",
+                                        json.dumps({"wifi_ssid": "New"}).encode())
+        self.assertIn(b"202", status)
+        self.reloader(False, True)
+        cfg.stage_config({"ntrip_host": "a.example"})
+        summary = cfg.stage_config({"ntrip_mount": "B"})
+        self.assertTrue(summary["restart_required"])           # the staged Wi-Fi
+        self.assertFalse(cfg._RESTART_REQUIRED)
+        self.assertEqual(self.reloads, [False, True])
+        cfg.discard_staged_config()
+        self.assertFalse(cfg.config_restart_required())
+
+    def test_put_of_a_caster_change_answers_200_without_restart(self):
+        self.reloader(True)
+        status, payload, reboots = self.call_config(
+            "/api/config", "PUT", json.dumps({"wifi_ssid": "Old", "ntrip_host": "new.example"}).encode())
+        self.assertIn(b"200", status)
+        self.assertEqual(json.loads(payload), {"pending": False, "restart_required": False,
+                                               "applied": ["ntrip_host"], "staged": [],
+                                               "staging_revision": cfg.staging_revision()})
+        self.assertEqual(self.reloads, [True])
+        status, payload, apply_reboots = self.call_config("/api/config/apply", body=b"{}")
+        self.assertIn(b"409", status)
+        self.assertIn(b"nothing_to_apply", payload)
+        self.assertEqual(reboots + apply_reboots, [])
+        self.assertFalse(cfg.pending_config_active())
+
+    def test_wifi_and_caster_in_one_put_reload_the_caster_and_stage_the_wifi(self):
+        self.reloader(True)
+        summary = cfg.stage_config({"wifi_ssid": "New", "ntrip_host": "new.example"})
+        self.assertEqual(self.reloads, [True])
+        self.assertEqual(summary["staged"], ["wifi_ssid"])
+        self.assertTrue(summary["restart_required"])           # the staging
+        self.assertTrue(cfg.apply_staged_config())
+        self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
+        self.assertEqual((cfg.CONFIG["wifi_ssid"], cfg.CONFIG["ntrip_host"]), ("Old", "new.example"))
+        self.assertEqual(self.reloads, [True])                 # the rollback changed no caster
+        self.assertFalse(cfg.config_restart_required())
+
+    def test_full_rollback_reloads_changed_caster_values(self):
+        self.full_rollback_setup()
+        self.reloader(True)
+        self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
+        self.assertEqual(self.reloads, [True])
+        self.assertEqual(cfg.CONFIG["ntrip_host"], "caster.example")
+        self.assertFalse(cfg.config_restart_required())
+
+    def test_full_rollback_hands_over_even_when_the_cleanup_fails(self):  # Codex 4
+        self.full_rollback_setup()
+        self.reloader(True)
+        with mock.patch.object(cfg_store, "finish", side_effect=[False, True]):
+            self.assertFalse(cfg.rollback_pending_config("authentication_failed"))
+            self.assertEqual(cfg.CONFIG["ntrip_host"], "caster.example")    # RAM changed
+            self.assertEqual(self.reloads, [True])
+            self.assertTrue(cfg.retry_rollback())
+        self.assertEqual(self.reloads, [True])                 # already handed over
+        self.assertFalse(cfg.config_restart_required())
+
+    def test_a_failed_rollback_handover_is_retried(self):                 # Codex 4
+        self.full_rollback_setup()
+        self.reloader(False, True)
+        with mock.patch.object(cfg_store, "finish", side_effect=[False, True]):
+            self.assertFalse(cfg.rollback_pending_config("authentication_failed"))
+            self.assertTrue(cfg.config_restart_required())
+            self.assertTrue(cfg.retry_rollback())
+        self.assertEqual(self.reloads, [False, True])
+        self.assertFalse(cfg.config_restart_required())
+
+    def test_rollback_without_a_reloader_changes_no_restart_flag(self):
+        self.full_rollback_setup()
+        self.assertTrue(cfg.rollback_pending_config("authentication_failed"))
+        self.assertEqual(cfg.CONFIG["ntrip_host"], "caster.example")
+        self.assertFalse(cfg.config_restart_required())
+
+    def test_put_without_changes_needs_no_restart_and_apply_refuses(self):
+        status, payload, _ = self.call_config(
+            "/api/config", "PUT", json.dumps({"wifi_ssid": "Old"}).encode())
+        self.assertIn(b"200", status)
+        self.assertFalse(json.loads(payload)["restart_required"])
+        status, payload, reboots = self.call_config("/api/config/apply", body=b"{}")
+        self.assertIn(b"409", status)
+        self.assertIn(b"nothing_to_apply", payload)
+        self.assertEqual(reboots, [])
+        self.assertFalse(cfg.pending_config_active())
+
+    def test_masked_networks_resolve_against_the_staged_list(self):
+        self.call_config("/api/config", "PUT", json.dumps(
+            {"wifi_networks": [{"ssid": "Field", "password": "fieldpass1"}]}).encode())
+        self.call_config("/api/config", "PUT", json.dumps(
+            {"wifi_networks": [{"ssid": "Field", "password_set": True}]}).encode())
+        self.assertEqual(cfg.staged_config()["wifi_networks"], [["Field", "fieldpass1"]])
+
+    def test_apply_save_and_restore_are_refused_while_connecting(self):
+        cfg.stage_config({"wifi_ssid": "Second"})
+        self.assertFalse(cfg.pending_config_active())           # no pending at all (ruling)
+        state.app.stats["access_state"] = "CONNECTING"
+        restore = json.dumps({"schema_version": 1, "kind": "esp-rtk-config-backup",
+                              "config": {"wifi_ssid": "Third"}}).encode()
+        for path, body in (("/api/config/apply", b"{}"), ("/api/config/restore", restore),
+                           ("/save", b"wifi_ssid=Third")):
+            status, payload, reboots = self.call_config(path, body=body)
+            self.assertIn(b"409", status, path)
+            self.assertEqual(reboots, [], path)
+            self.assertFalse(cfg.pending_config_active(), path)
+            if path != "/save":
+                self.assertEqual(json.loads(payload)["error"], "config_verification_running", path)
+        with open("config.json") as fh:
+            self.assertEqual(json.load(fh)["wifi_ssid"], "Old")
+        self.assertEqual(cfg.config_result_read()["status"], "none")
+
+    def test_apply_save_and_restore_are_refused_while_a_change_is_open(self):
+        restore = json.dumps({"schema_version": 1, "kind": "esp-rtk-config-backup",
+                              "config": {"wifi_ssid": "Third"}}).encode()
+        for prepare in ("armed", "failed"):                     # verification pending / recorded decision
+            self.fresh()
+            cfg.stage_config({"wifi_ssid": "First"})
+            self.assertTrue(cfg.apply_staged_config())
+            if prepare == "failed":
+                self.assertTrue(cfg.config_result_write("failed", details={"code": "authentication_failed",
+                                                                           "restored": ["wifi_ssid"]}))
+            with open(cfg.PENDING_CONFIG_FILE) as fh: pending_before = json.load(fh)
+            self.call_config("/api/config", "PUT", json.dumps({"wifi_ssid": "Second"}).encode())
+            for path, body in (("/api/config/apply", b"{}"), ("/api/config/restore", restore),
+                               ("/save", b"wifi_ssid=Third")):
+                status, payload, reboots = self.call_config(path, body=body)
+                with self.subTest(prepare=prepare, path=path):
+                    self.assertIn(b"409", status)
+                    self.assertEqual(reboots, [])
+                    if path != "/save":
+                        self.assertEqual(json.loads(payload)["error"], "open_change_pending")
+                    with open(cfg.PENDING_CONFIG_FILE) as fh:
+                        self.assertEqual(json.load(fh), pending_before)
+            self.assertFalse(cfg.apply_staged_config())          # defensive refusal in cfg as well
+
+    def test_power_cut_at_every_apply_step_never_confirms_an_unlanded_change(self):
+        for works in (("Old",), ("Old", "New")):
+            step = 1
+            while True:
+                self.fresh()
+                cfg.stage_config({"wifi_ssid": "New"})
+                with self.cut_at(step):
+                    try:
+                        done = cfg.apply_staged_config()
+                    except PowerCut:
+                        done = None
+                self.boot(works)
+                with self.subTest(works=works, step=step):
+                    self.assertFalse(cfg.pending_config_active())
+                    status = cfg.config_result_read()["status"]
+                    self.assertIn(status, ("none", "connected", "failed"))
+                    self.assertEqual(status == "connected", cfg.CONFIG["wifi_ssid"] == "New")
+                    if "New" not in works:
+                        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+                if done is not None:
+                    break
+                step += 1
+            self.assertGreater(step, 3)                         # the cut really walked through the steps
+
+    def test_apply_with_an_unwritable_result_arms_nothing(self):
+        cfg.stage_config({"wifi_ssid": "New"})
+        with self.fail_writes_to(cfg.CONFIG_RESULT_FILE):
+            self.assertFalse(cfg.apply_staged_config())
+        self.assertFalse(cfg.pending_config_active())
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertEqual(cfg.staged_config(), {"wifi_ssid": "New"})
+
+    def test_failed_arm_restores_the_previous_result(self):
+        self.assertTrue(cfg.config_result_write("connected", details={"ssid": "Old"}))
+        cfg.stage_config({"wifi_ssid": "New"})
+        with self.fail_writes_to("config.json"):
+            self.assertFalse(cfg.apply_staged_config())
+        self.assertEqual(cfg.config_result_read()["details"], {"ssid": "Old"})
+
+    def test_failed_arm_without_an_earlier_result_writes_a_complete_none(self):
+        self.assertFalse(os.path.exists(cfg.CONFIG_RESULT_FILE))
+        cfg.stage_config({"wifi_ssid": "New"})
+        with self.fail_writes_to("config.json"):
+            self.assertFalse(cfg.apply_staged_config())
+        self.assertEqual(cfg.config_result_read()["status"], "none")
+        if os.path.exists(cfg.CONFIG_RESULT_FILE):
+            with open(cfg.CONFIG_RESULT_FILE) as fh:
+                stored = json.load(fh)
+            self.assertEqual(set(stored), {"schema_version", "status", "details", "uptime_sec",
+                                           "boot_id", "apply_id"})
+
+    def test_failed_save_and_restore_leave_nothing_staged(self):
+        restore = json.dumps({"schema_version": 1, "kind": "esp-rtk-config-backup",
+                              "config": {"wifi_ssid": "Third"}}).encode()
+        for path, body in (("/save", b"wifi_ssid=Third"), ("/api/config/restore", restore)):
+            self.fresh()
+            with self.fail_writes_to("config.json"):
+                status, _, reboots = self.call_config(path, body=body)
+            with self.subTest(path=path):
+                self.assertIn(b"500", status)
+                self.assertEqual(reboots, [])
+                self.assertEqual(cfg.staged_config(), {})        # the user saw the failure
+                self.assertFalse(cfg.pending_config_active())
+                self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+                status, payload, reboots = self.call_config("/api/config/apply", body=b"{}")
+                self.assertEqual(json.loads(payload)["error"], "nothing_to_apply")
+                self.assertEqual(reboots, [])
+
+    def test_the_change_check_recovers_the_files_once_per_request(self):
+        real, calls, errors = cfg_store.recover_staging, [], []
+
+        def counting(*args):
+            calls.append(args)
+            return real(*args)
+
+        def failing(*args):
+            calls.append(args)
+            return False
+        for flag in (False, True):                            # no change / a rollback open in RAM
+            del calls[:]
+            cfg._ROLLBACK_OPEN = flag
+            with mock.patch.object(cfg_store, "recover_staging", side_effect=counting):
+                self.assertEqual(web._open_change_pending(), flag)
+            self.assertEqual(len(calls), 1, flag)
+        cfg._ROLLBACK_OPEN = False
+        del calls[:]
+        with mock.patch.object(cfg_store, "recover_staging", side_effect=failing), \
+                mock.patch.object(cfg, "log", side_effect=lambda sev, *a, **k: errors.append(sev)):
+            self.assertEqual(web._config_refusal()[0], "open_change_pending")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(errors.count("ERROR"), 1)
+
+    def test_failed_save_and_restore_keep_an_earlier_restart_requirement(self):
+        restore = json.dumps({"schema_version": 1, "kind": "esp-rtk-config-backup",
+                              "config": {"ntrip_host": "new.example"}}).encode()
+        for path, body in (("/save", b"wifi_ssid=Old&ntrip_host=new.example"),
+                           ("/api/config/restore", restore)):
+            self.fresh()
+            cfg.discard_staged_config()
+            with self.subTest(path=path):
+                status, payload, _ = self.call_config(
+                    "/api/config", "PUT", json.dumps({"ntrip_host": "new.example"}).encode())
+                self.assertTrue(json.loads(payload)["restart_required"])   # caster saved, task still old
+                with self.fail_writes_to("config.json"):                   # the same value, arm fails
+                    status, _, reboots = self.call_config(path, body=body)
+                self.assertIn(b"500", status)
+                self.assertEqual(reboots, [])
+                self.assertTrue(cfg.config_restart_required())
+                status, payload, reboots = self.call_config("/api/config/apply", body=b"{}")
+                self.assertIn(b"202", status)
+                self.assertEqual(reboots, ["/api/config/apply"])
+            cfg.discard_staged_config()
+
+    def test_save_and_restore_ignore_and_drop_an_earlier_staging(self):
+        restore = json.dumps({"schema_version": 1, "kind": "esp-rtk-config-backup",
+                              "config": {"wifi_ssid": "Old"}}).encode()
+        for path, body in (("/save", b"wifi_ssid=Old&wifi_pass="), ("/api/config/restore", restore)):
+            self.fresh()
+            self.call_config("/api/config", "PUT", json.dumps({"wifi_pass": "staged-password-1"}).encode())
+            status, _, reboots = self.call_config(path, body=body)
+            self.assertIn(b"20", status, path)
+            self.assertEqual(reboots, [path])
+            with open(cfg.PENDING_CONFIG_FILE) as fh:
+                self.assertEqual(json.load(fh)["wifi_pass"], "legacy-password", path)
+            self.assertEqual(cfg.staged_config(), {}, path)
+
+    def test_failed_arm_leaves_no_half_applied_change(self):
+        real = cfg._atomic_dump
+        def fail_config_json(target, data):
+            return False if target == "config.json" else real(target, data)
+        cfg.stage_config({"wifi_ssid": "New"})
+        with mock.patch.object(cfg, "_atomic_dump", side_effect=fail_config_json):
+            self.assertFalse(cfg.apply_staged_config())
+        self.assertFalse(cfg.pending_config_active())
+        self.assertFalse(os.path.exists(cfg.LAST_GOOD_CONFIG_FILE))
+        self.assertEqual(cfg.CONFIG["wifi_ssid"], "Old")
+        self.assertEqual(cfg.staged_config(), {"wifi_ssid": "New"})   # retry possible
+        self.assertTrue(cfg.apply_staged_config())
+
+    def test_restore_and_save_stage_apply_and_restart(self):
+        backup = json.dumps({"schema_version": 1, "kind": "esp-rtk-config-backup",
+                             "config": {"wifi_ssid": "Restored", "ntrip_host": "r.example"}}).encode()
+        status, payload, reboots = self.call_config("/api/config/restore", body=backup)
+        self.assertIn(b"202", status)
+        self.assertEqual(json.loads(payload), {"restored": True, "schema_version": 1,
+                                               "sections": ["connections"], "kept": [],
+                                               "apply_id": None})
+        self.assertEqual(reboots, ["/api/config/restore"])
+        with open(cfg.PENDING_CONFIG_FILE) as fh:
+            self.assertEqual(json.load(fh)["wifi_ssid"], "Restored")
+        self.assertEqual(cfg.CONFIG["ntrip_host"], "r.example")
+
+    def test_save_form_refuses_nine_networks_and_short_passwords(self):
+        nine = "%0A".join("Net%d%%3Apassword%d" % (i, i) for i in range(9))
+        for networks in (nine, "Field%3Ashort"):
+            status, payload, reboots = self.call_config(
+                "/save", body=("wifi_ssid=Old&wifi_networks=" + networks).encode())
+            self.assertIn(b"400", status, networks)
+            self.assertIn(b"Rejected", payload)
+            self.assertEqual(reboots, [])
+            self.assertFalse(cfg.pending_config_active())
+
+    def test_json_put_keeps_the_network_error_code(self):
+        body = json.dumps({"wifi_networks": [{"ssid": "Net%d" % i, "password": "password%d" % i}
+                                             for i in range(9)]}).encode()
+        status, payload, _ = self.call_config("/api/config", "PUT", body)
+        self.assertIn(b"400", status)
+        self.assertEqual(json.loads(payload)["error"], "invalid_wifi_networks")
+
+    def test_masked_row_with_a_non_text_ssid_is_rejected(self):
+        for ssid in ([], {}, 7, None):
+            body = json.dumps({"wifi_networks": [{"ssid": ssid, "password_set": True}]}).encode()
+            status, payload, _ = self.call_config("/api/config", "PUT", body)
+            with self.subTest(ssid=ssid):
+                self.assertIn(b"400", status)
+                self.assertEqual(json.loads(payload)["error"], "invalid_wifi_networks")
+        self.assertEqual(cfg.staged_config(), {})
+
+    def test_null_secret_keeps_the_stored_value_on_put_and_restore(self):
+        cfg.CONFIG["ntrip_pass"] = "caster-secret"
+        self.assertTrue(cfg.save_config())
+        status, payload, _ = self.call_config("/api/config", "PUT", json.dumps(
+            {"wifi_pass": None, "ntrip_pass": None, "ntrip_fallback_pass": None}).encode())
+        self.assertIn(b"200", status)
+        self.assertEqual(json.loads(payload)["applied"], [])
+        self.assertEqual(cfg.CONFIG["ntrip_pass"], "caster-secret")
+        self.assertEqual(cfg.staged_config(), {})
+        backup = json.dumps({"schema_version": 1, "kind": "esp-rtk-config-backup",
+                             "config": {"wifi_ssid": "Old", "wifi_pass": None,
+                                        "ntrip_pass": None}}).encode()
+        status, _, reboots = self.call_config("/api/config/restore", body=backup)
+        self.assertIn(b"202", status)
+        self.assertEqual(reboots, ["/api/config/restore"])
+        with open(cfg.PENDING_CONFIG_FILE) as fh:
+            candidate = json.load(fh)
+        self.assertEqual(candidate["wifi_pass"], "legacy-password")
+        self.assertEqual(candidate["ntrip_pass"], "caster-secret")
+
+    def test_restore_refuses_nine_networks_and_short_passwords(self):
+        nine = [["Net%d" % i, "password%d" % i] for i in range(9)]
+        for networks in (nine, [["Field", "short"]]):
+            backup = {"schema_version": 1, "kind": "esp-rtk-config-backup",
+                      "config": {"wifi_ssid": "Old", "wifi_networks": networks}}
+            values, error = web.validate_backup(backup)
+            self.assertIsNone(values)
+            self.assertTrue(error)
+            status, payload, reboots = self.call_config("/api/config/restore",
+                                                        body=json.dumps(backup).encode())
+            with self.subTest(networks=len(networks)):
+                self.assertIn(b"400", status)
+                self.assertEqual(json.loads(payload)["error"], "invalid_backup")
+                self.assertEqual(reboots, [])
+                self.assertFalse(cfg.pending_config_active())
+
+    def test_save_form_refuses_a_fractional_port(self):
+        status, payload, reboots = self.call_config(
+            "/save", body=b"wifi_ssid=Old&ntrip_host=c.example&ntrip_mount=M&ntrip_port=2101.5")
+        self.assertIn(b"400", status)
+        self.assertIn(b"ntrip_port", payload)
+        self.assertEqual(reboots, [])
+        self.assertFalse(cfg.pending_config_active())
 
     def test_v9_port_is_migrated_to_dual_port(self):
         with open("config.json", "w") as fh:
@@ -378,6 +1674,9 @@ class TestStateContracts(unittest.TestCase):
         self.assertEqual(state.app.stats["ntrip_state"], "streaming")
         with self.assertRaises(ValueError):
             state.app.set_ntrip_state("stale")
+        for rejected in ("exhausted", "caster_error", "protocol_error"):
+            with self.assertRaises(ValueError):
+                state.app.set_ntrip_state(rejected)
 
 
 class FakeReader:
@@ -542,12 +1841,15 @@ class TestHttpAccess(unittest.TestCase):
                b"Origin: http://rtk-d4e5f6.local\r\nCookie: rtk_session=" +
                session["token"].encode() + b"\r\nContent-Length: " +
                str(len(body)).encode() + b"\r\n\r\n" + body)
-        original_stage = web.stage_config
-        web.stage_config = lambda _values: False  # do not schedule a test reboot
+        original_apply = web.apply_config_change
+        old_access = state.app.stats.get("access_state")
+        web.apply_config_change = lambda _values: False  # do not schedule a test reboot
+        state.app.stats["access_state"] = "ONLINE"        # not refused as connecting
         try:
             response = http_request(raw)
         finally:
-            web.stage_config = original_stage
+            web.apply_config_change = original_apply
+            state.app.stats["access_state"] = old_access
         self.assertNotIn(b"403 Forbidden", response)
         self.assertIn(b"500 Internal Server Error", response)
 
@@ -622,18 +1924,26 @@ class TestHttpAccess(unittest.TestCase):
         self.assertIn(b"Referrer-Policy: no-referrer", response)
         self.assertIn(b"X-Frame-Options: DENY", response)
 
-    def test_admin_session_is_allowed_to_read_protected_status(self):
-        old = cfg.CONFIG.get("status_token")
-        cfg.CONFIG["status_token"] = "legacy-read-token"
-        session, error = access.login("ABCDEF123456", "ABCDEF123456",
-                                      "203.0.113.9")
-        self.assertIsNone(error)
+    def test_status_reports_rejected_config_values(self):
+        session, _error = access.login("ABCDEF123456", "ABCDEF123456", "203.0.113.9")
+        cfg.CONFIG_WARNINGS[:] = [{"key": "antenna_height_m", "message": "bad"}]
         try:
             response = http_request(
                 b"GET /status HTTP/1.0\r\nCookie: rtk_session=" +
                 session["token"].encode() + b"\r\n\r\n")
         finally:
-            cfg.CONFIG["status_token"] = old
+            del cfg.CONFIG_WARNINGS[:]
+        self.assertIn(b"200 OK", response)
+        self.assertIn(b'"config_warnings": [{', response)
+        self.assertIn(b"antenna_height_m", response)
+
+    def test_admin_session_is_allowed_to_read_protected_status(self):
+        session, error = access.login("ABCDEF123456", "ABCDEF123456",
+                                      "203.0.113.9")
+        self.assertIsNone(error)
+        response = http_request(
+            b"GET /status HTTP/1.0\r\nCookie: rtk_session=" +
+            session["token"].encode() + b"\r\n\r\n")
         self.assertIn(b"200 OK", response)
         self.assertIn(b'application/json', response)
 
@@ -647,28 +1957,23 @@ class TestHttpAccess(unittest.TestCase):
         return session, headers
 
     def test_all_protected_reading_routes_accept_admin_session(self):
-        old = cfg.CONFIG.get("status_token")
-        cfg.CONFIG["status_token"] = "protected"
         _session, headers = self._session_headers()
-        try:
-            for path in ("/label", "/api/label", "/api/config", "/status",
-                         "/health", "/rtcm", "/errors", "/gnss"):
-                response = http_request(
-                    ("GET %s HTTP/1.0\r\n" % path).encode() + headers + b"\r\n")
-                self.assertIn(b"200 OK", response, path)
-        finally:
-            cfg.CONFIG["status_token"] = old
+        for path in ("/label", "/api/label", "/api/config", "/status",
+                     "/health", "/rtcm", "/errors", "/gnss"):
+            response = http_request(
+                ("GET %s HTTP/1.0\r\n" % path).encode() + headers + b"\r\n")
+            self.assertIn(b"200 OK", response, path)
 
     def test_protected_reading_routes_remain_closed_without_access(self):
-        old = cfg.CONFIG.get("status_token")
-        cfg.CONFIG["status_token"] = "protected"
-        try:
-            for path in ("/label", "/api/label", "/api/config", "/status",
-                         "/health", "/rtcm", "/errors", "/gnss"):
-                response = http_request(("GET %s HTTP/1.0\r\n\r\n" % path).encode())
-                self.assertNotIn(b"200 OK", response, path)
-        finally:
-            cfg.CONFIG["status_token"] = old
+        for path in ("/label", "/api/label", "/api/config", "/status",
+                     "/health", "/rtcm", "/errors", "/gnss"):
+            response = http_request(("GET %s HTTP/1.0\r\n\r\n" % path).encode())
+            self.assertNotIn(b"200 OK", response, path)
+        # The /rtcm rejection names the admin session, not a token that nothing accepts.
+        rtcm = http_request(b"GET /rtcm?token=anything HTTP/1.0\r\n\r\n")
+        self.assertIn(b"401 Unauthorized", rtcm)
+        self.assertIn(b"Administrator sign-in required.", rtcm)
+        self.assertNotIn(b"oken", rtcm.split(b"\r\n\r\n", 1)[1])
 
     def test_config_api_masks_all_wlan_passwords(self):
         old = cfg.CONFIG.get("wifi_networks")
@@ -698,9 +2003,9 @@ class TestHttpAccess(unittest.TestCase):
         session, headers = self._session_headers()
         body = (b"csrf_token=" + session["csrf"].encode() +
                 b"&wifi_ssid=field-test-network&wifi_pass=secret12")
-        old_stage = web.stage_config
+        old_apply = web.apply_config_change
         old_access = state.app.stats.get("access_state")
-        web.stage_config = lambda values: True
+        web.apply_config_change = lambda values: True
         state.app.stats["access_state"] = "SETUP"
         try:
             response = http_request(
@@ -709,7 +2014,7 @@ class TestHttpAccess(unittest.TestCase):
                 (b"Content-Length: %d\r\n\r\n" % len(body)) + body,
                 local=cfg.CONFIG["ap_ip"])
         finally:
-            web.stage_config = old_stage
+            web.apply_config_change = old_apply
             state.app.stats["access_state"] = old_access
         self.assertIn(b"200 OK", response)
         self.assertNotIn(b"Configuration access expired", response)
@@ -783,10 +2088,38 @@ class TestHttpAccess(unittest.TestCase):
         self.assertIn(b"200 OK", response)
         self.assertIn(b"NEWSTREAMTOKEN", response)
 
+    def _rotate_with_disconnect_spy(self, new_token):
+        """Rotate via HTTP; returns the response and the token seen by each disconnect."""
+        _session, headers = self._session_headers(csrf=True)
+        seen = []
+
+        async def disconnect():
+            seen.append(state.app.identity.get("stream_token"))
+            return 2
+
+        with mock.patch.object(web, "rotate_stream_token", lambda: new_token), \
+                mock.patch.object(web, "disconnect_all_clients", disconnect):
+            response = http_request(
+                b"POST /api/stream-token/rotate HTTP/1.0\r\n"
+                b"Host: rtk-d4e5f6.local\r\n"
+                b"Origin: http://rtk-d4e5f6.local\r\n" + headers + b"\r\n")
+        return response, seen
+
+    def test_stream_token_rotation_disconnects_tcp_clients(self):
+        response, seen = self._rotate_with_disconnect_spy("NEWSTREAMTOKEN")
+        self.assertIn(b"200 OK", response)
+        self.assertIn(b"NEWSTREAMTOKEN", response)
+        self.assertEqual(seen, ["NEWSTREAMTOKEN"])      # token set before disconnecting
+
+    def test_failed_rotation_keeps_tcp_clients(self):
+        response, seen = self._rotate_with_disconnect_spy(None)
+        self.assertIn(b"500 Internal Server Error", response)
+        self.assertEqual(seen, [])
+
     def test_reboot_is_admin_and_csrf_protected(self):
         denied = http_request(
             b"POST /api/reboot HTTP/1.0\r\nContent-Length: 0\r\n\r\n")
-        self.assertIn(b"403 Forbidden", denied)
+        self.assertIn(b"401 Unauthorized", denied)
         _session, headers = self._session_headers(csrf=True)
         response = http_request(
             b"POST /api/reboot HTTP/1.0\r\nHost: rtk-d4e5f6.local\r\n"

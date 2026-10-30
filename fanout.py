@@ -4,23 +4,39 @@
 TCP authentication is enabled by default and may be disabled explicitly. A
 client must therefore follow the current access contract instead of assuming
 that the first bytes are always NMEA or always an AUTH greeting.
+
+Each TCP client has its own bounded queue and writer task, so one stalled
+socket cannot delay the others.
 """
 import uasyncio as asyncio
 import time
 
 from cfg import CONFIG, log
+from cfg_logging import HOT_PATH_LOG_INTERVAL_MS, LogThrottle, throttle_note
 from state import SimpleQueue, app, shutdown_event
 
 # Open TCP clients. One list, no amount: StreamWriters aren't necessarily hashable, and
 # more than a handful of clients never exist here.
 clients = []
-_reader_tasks = {}
+# Delivery state of each open client (_ClientSession), keyed by id(writer).
+_sessions = {}
+_next_client_id = 0
 pending_auth = 0
+# Bumped by every stream-token rotation; a handshake that started in an older
+# epoch was checked against the old token and is not admitted.
+_rotation_epoch = 0
 AUTH_TIMEOUT_SEC = 5
 AUTH_MAX_BYTES = 96
+# Whole handshake incl. the server's drains, from connection start.
+AUTH_DEADLINE_SEC = 10
 # A single measured flash commit can take about 2.5 s. Keep a finite socket
-# deadline that accommodates it; the bounded queue holds about 7 s of NMEA.
+# deadline that accommodates it; each client queue holds about 7 s of NMEA;
+# a single drain must finish within this deadline.
 CLIENT_WRITE_TIMEOUT_SEC = 5
+# Per-client queue bound, whichever limit is reached first. A full queue drops
+# the new payload (tail drop); payloads are shared references, not copies.
+CLIENT_QUEUE_ITEMS = 100
+CLIENT_QUEUE_BYTES = 8192
 TCP_BATCH_BYTES = 2048
 TCP_BATCH_SENTENCES = 16
 # Match the UART parser's bounded catch-up turns. TCP can hold sixteen normal
@@ -40,60 +56,189 @@ def _secret_equal(left, right):
     return difference == 0
 
 
-async def _authenticate_client(reader, writer):
-    """Expects as the first line ``AUTH <stream_token>``."""
+def _max_clients():
+    """Shared limit for open AUTH handshakes and established clients."""
+    return int(CONFIG.get("nmea_tcp_max_clients", 4))
+
+
+def _auth_budget(started_ms, cap_sec):
+    """Seconds left for the next handshake step, at most cap_sec.
+
+    Raises asyncio.TimeoutError once AUTH_DEADLINE_SEC since started_ms is used up.
+    """
+    left = AUTH_DEADLINE_SEC - time.ticks_diff(time.ticks_ms(), started_ms) / 1000
+    budget = min(cap_sec, left)
+    if budget <= 0:
+        raise asyncio.TimeoutError()
+    return budget
+
+
+async def _authenticate_client(reader, writer, started_ms=None):
+    """Expects as the first line ``AUTH <stream_token>``.
+
+    Every step, the server's drains included, shares one AUTH_DEADLINE_SEC
+    budget counted from started_ms (default: now).
+    """
+    started = time.ticks_ms() if started_ms is None else started_ms
     try:
         writer.write(b"AUTH REQUIRED\r\n")
-        await writer.drain()
+        await asyncio.wait_for(writer.drain(), _auth_budget(started, AUTH_DEADLINE_SEC))
         raw = bytearray()
         # Do not use readline(): on some MicroPython stream implementations it
         # allocates the complete attacker-controlled line before returning.
         while len(raw) <= AUTH_MAX_BYTES:
-            chunk = await asyncio.wait_for(reader.read(1), AUTH_TIMEOUT_SEC)
+            chunk = await asyncio.wait_for(reader.read(1),
+                                           _auth_budget(started, AUTH_TIMEOUT_SEC))
             if not chunk:
                 break
             raw.extend(chunk)
             if chunk == b"\n":
                 break
+        if not raw or len(raw) > AUTH_MAX_BYTES or raw[-1:] != b"\n":
+            return False
+        line = bytes(raw).strip()
+        supplied = line[5:] if line.startswith(b"AUTH ") else b""
+        expected = (app.identity or {}).get("stream_token", "")
+        if not expected or not _secret_equal(supplied, expected):
+            app.stats["tcp_auth_failures"] = app.stats.get("tcp_auth_failures", 0) + 1
+            writer.write(b"ERR AUTH\r\n")
+            await asyncio.wait_for(writer.drain(),
+                                   _auth_budget(started, AUTH_DEADLINE_SEC))
+            return False
+        writer.write(b"OK AUTH\r\n")
+        await asyncio.wait_for(writer.drain(), _auth_budget(started, AUTH_DEADLINE_SEC))
+        return True
     except Exception:
         return False
-    if not raw or len(raw) > AUTH_MAX_BYTES or raw[-1:] != b"\n":
-        return False
-    line = bytes(raw).strip()
-    supplied = line[5:] if line.startswith(b"AUTH ") else b""
-    expected = (app.identity or {}).get("stream_token", "")
-    if not expected or not _secret_equal(supplied, expected):
-        app.stats["tcp_auth_failures"] = app.stats.get("tcp_auth_failures", 0) + 1
-        writer.write(b"ERR AUTH\r\n")
-        await writer.drain()
-        return False
-    writer.write(b"OK AUTH\r\n")
-    await writer.drain()
-    return True
+
+
+def _sentences(data):
+    """Number of NMEA sentences in a payload; a fragment counts as one."""
+    return data.count(b"\n") or 1
+
+
+class _ClientSession:
+    """Bounded output queue and writer task of one TCP client.
+
+    The reader task (the connection handler, which only watches for the
+    connection end) and the writer task always end together: cancelling one
+    waiter makes MicroPython's IO poller drop the whole socket, so a leftover
+    partner task would wait forever.
+    """
+
+    def __init__(self, writer, reader_task, client_id):
+        self.writer = writer
+        self.reader_task = reader_task
+        self.writer_task = None
+        self.items = []
+        self.queued_bytes = 0
+        # Payload taken by the writer but not yet confirmed by drain().
+        self.inflight = None
+        self.ready = asyncio.Event()
+        self.stats = {"id": client_id, "drops": 0, "queue_max": 0}
+        # Set by remove_client: the writer ends even if its cancel was lost.
+        self.closed = False
+
+    def offer(self, data):
+        """Queue a payload for this client; False means it was dropped."""
+        if (len(self.items) >= CLIENT_QUEUE_ITEMS
+                or self.queued_bytes + len(data) > CLIENT_QUEUE_BYTES):
+            self.count_drops(_sentences(data))
+            app.stats["tcp_queue_overflows"] = app.stats.get("tcp_queue_overflows", 0) + 1
+            return False
+        self.items.append(data)
+        self.queued_bytes += len(data)
+        depth = len(self.items)
+        self.stats["queue_max"] = max(self.stats["queue_max"], depth)
+        app.stats["tcp_client_queue_max"] = max(
+            app.stats.get("tcp_client_queue_max", 0), depth)
+        self.ready.set()
+        return True
+
+    def take(self):
+        """Next payload in order (kept as in-flight), or None when empty."""
+        if not self.items:
+            return None
+        # pop(0) is cheap enough here: the queue never exceeds CLIENT_QUEUE_ITEMS.
+        data = self.items.pop(0)
+        self.queued_bytes -= len(data)
+        self.inflight = data
+        return data
+
+    def count_drops(self, sentences):
+        self.stats["drops"] += sentences
+        app.stats["nmea_tcp_drops"] += sentences
+
+    def discard(self):
+        """Drop the in-flight and queued payloads, counting their sentences."""
+        lost = 0
+        if self.inflight is not None:
+            lost += _sentences(self.inflight)
+        for data in self.items:
+            lost += _sentences(data)
+        self.inflight = None
+        self.items = []
+        self.queued_bytes = 0
+        if lost:
+            self.count_drops(lost)
+        return lost
+
+    def start(self):
+        self.writer_task = asyncio.create_task(_client_writer(self))
+
+    def cancel_tasks(self):
+        """Cancel reader and writer task, except the task calling this."""
+        tasks = [task for task in (self.reader_task, self.writer_task)
+                 if task is not None]
+        if not tasks:
+            return
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            # Called outside a task (MicroPython raises here, CPython without a loop).
+            current = None
+        for task in tasks:
+            if task is not current:
+                task.cancel()
 
 
 def add_client(writer, reader_task=None):
-    """Pick up a client when there is still space."""
-    threshold = CONFIG.get("nmea_tcp_max_clients", 4)
-    if len(clients) >= threshold:
-        return False
+    """Create a session when there is still space; its writer is not started yet."""
+    global _next_client_id
+    if len(clients) >= _max_clients():
+        return None
+    _next_client_id += 1
+    session = _ClientSession(writer, reader_task, _next_client_id)
     clients.append(writer)
-    if reader_task is not None:
-        _reader_tasks[id(writer)] = reader_task
-    return True
+    _sessions[id(writer)] = session
+    app.stats.setdefault("nmea_tcp_client_stats", []).append(session.stats)
+    return session
 
 
 def remove_client(writer):
-    """Removes a client; double removal is harmless."""
+    """Remove a client and end its session; double removal is harmless.
+
+    Returns True when this call ended a session. Undelivered payloads count
+    as drops; reader and writer task are cancelled together (see
+    _ClientSession).
+    """
     try:
         clients.remove(writer)
     except ValueError:
         pass
-    task = _reader_tasks.pop(id(writer), None)
-    if task is not None and task is not asyncio.current_task():
-        # Cancelling a timed-out drain can also unregister the blocked reader
-        # from MicroPython's IO poller. Do not leave that reader task orphaned.
-        task.cancel()
+    session = _sessions.pop(id(writer), None)
+    if session is None:
+        return False
+    session.closed = True
+    # Wakes a writer in ready.wait() so it sees the flag even without a cancel.
+    session.ready.set()
+    session.discard()
+    try:
+        app.stats["nmea_tcp_client_stats"].remove(session.stats)
+    except (KeyError, ValueError):
+        pass
+    session.cancel_tasks()
+    return True
 
 
 async def _close_writer(writer):
@@ -105,97 +250,164 @@ async def _close_writer(writer):
         pass
 
 
-async def broadcast(data):
-    """Send a sentence to all TCP clients. If you don't accept any more, you'll fly out - one dead client won't be allowed to stop the stream for the others. You'll iterate over a copy because it changes the list.
+async def disconnect_all_clients():
+    """End every TCP session and close its socket (stream-token rotation).
+
+    Returns the number of disconnected clients. Handshakes still in progress
+    are not admitted afterwards (see _rotation_epoch).
     """
-    if not clients:
-        return
-    for writer in list(clients):
-        started = time.ticks_ms()
-        try:
-            writer.write(data)
-            await asyncio.wait_for(writer.drain(), CLIENT_WRITE_TIMEOUT_SEC)
-            app.stats["tcp_tx_bytes"] = app.stats.get("tcp_tx_bytes", 0) + len(data)
-        except Exception as error:
-            remove_client(writer)
-            app.stats["nmea_tcp_drops"] += 1
-            timeout = isinstance(error, asyncio.TimeoutError)
-            key = "tcp_write_timeouts" if timeout else "tcp_write_errors"
-            app.stats[key] = app.stats.get(key, 0) + 1
-            app.stats["tcp_last_write_error"] = type(error).__name__
-            log("WARN", "GNSS", "NMEA-TCP send failed (%s); closing client." % type(error).__name__)
-            await _close_writer(writer)
-        finally:
-            app.stats["tcp_write_max_ms"] = max(app.stats.get("tcp_write_max_ms", 0),
-                max(0, time.ticks_diff(time.ticks_ms(), started)))
+    global _rotation_epoch
+    _rotation_epoch += 1
+    # Copy: remove_client changes clients in place, which is never rebound.
+    writers = list(clients)
+    for writer in writers:
+        remove_client(writer)
+    for writer in writers:
+        await _close_writer(writer)
+    return len(writers)
+
+
+_SEND_FAILURE_LOG = LogThrottle(HOT_PATH_LOG_INTERVAL_MS)
+
+
+def _log_send_failure(error_name):
+    # Throttled: dead clients can fail every sentence; counts are in /status (tcp_write_errors).
+    n = _SEND_FAILURE_LOG.hit(error_name)
+    if n:
+        log("WARN", "GNSS", "NMEA-TCP send failed (%s); closing client.%s"
+            % (error_name, throttle_note(n)))
+
+
+async def broadcast(data):
+    """Queue a payload for every TCP client without waiting for any socket.
+
+    All clients share the same bytes object; each client's writer task sends
+    it, so a stalled client only loses its own copy.
+    """
+    for writer in clients:
+        session = _sessions.get(id(writer))
+        if session is not None:
+            session.offer(data)
+
+
+async def _deliver(session, data):
+    """Write one payload to the client; on failure the client is removed and closed."""
+    writer = session.writer
+    started = time.ticks_ms()
+    try:
+        writer.write(data)
+        await asyncio.wait_for(writer.drain(), CLIENT_WRITE_TIMEOUT_SEC)
+        session.inflight = None
+        app.stats["tcp_tx_bytes"] = app.stats.get("tcp_tx_bytes", 0) + len(data)
+        return True
+    except Exception as error:
+        # Counts the in-flight payload and the queued ones as drops.
+        remove_client(writer)
+        timeout = isinstance(error, asyncio.TimeoutError)
+        key = "tcp_write_timeouts" if timeout else "tcp_write_errors"
+        app.stats[key] = app.stats.get(key, 0) + 1
+        app.stats["tcp_last_write_error"] = type(error).__name__
+        _log_send_failure(type(error).__name__)
+        await _close_writer(writer)
+        return False
+    finally:
+        app.stats["tcp_write_max_ms"] = max(app.stats.get("tcp_write_max_ms", 0),
+            max(0, time.ticks_diff(time.ticks_ms(), started)))
+
+
+async def _client_writer(session):
+    """Send one client's queued payloads in order until it fails or is removed.
+
+    The closed flag ends the loop on the next wake even when remove_client's
+    cancel was swallowed (uasyncio's wait_for can lose a cancellation that
+    arrives as its inner task completes).
+    """
+    try:
+        while not shutdown_event.is_set() and not session.closed:
+            data = session.take()
+            if data is None:
+                session.ready.clear()
+                await session.ready.wait()
+                continue
+            if not await _deliver(session, data):
+                break
+    except Exception as error:
+        # MicroPython would only print an unhandled task error; end the session instead.
+        _log_send_failure(type(error).__name__)
+    finally:
+        if remove_client(session.writer):
+            await _close_writer(session.writer)
 
 
 async def _handle_client(reader, writer):
-    """Optionally authenticates a TCP client before sending the NMEA stream."""
+    """Optionally authenticates a TCP client before sending the NMEA stream.
+
+    The socket is closed on every path, cancellation included.
+    """
     global pending_auth
+    started = time.ticks_ms()
+    epoch = _rotation_epoch
     try:
         peer = writer.get_extra_info("peername")
     except Exception:
         peer = None
 
-    threshold = int(CONFIG.get("nmea_tcp_max_clients", 4))
-    auth_required = bool(CONFIG.get("nmea_tcp_auth_required", True))
-    if auth_required and pending_auth >= threshold:
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
-        return
-    if auth_required:
-        pending_auth += 1
-        try:
-            authenticated = await _authenticate_client(reader, writer)
-        finally:
-            pending_auth -= 1
-    else:
-        authenticated = True
-
-    if not authenticated:
-        app.stats["nmea_tcp_auth_failures"] = (
-            app.stats.get("nmea_tcp_auth_failures", 0) + 1)
-        log("WARN", "GNSS", "NMEA-TCP: Authentication rejected (%s)." % (peer,))
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
+    # Open handshakes and established clients share one limit. Reject without
+    # any bytes or log line, so a connection flood cannot fill the log.
+    if pending_auth + len(clients) >= _max_clients():
+        app.stats["nmea_tcp_rejected_full"] = (
+            app.stats.get("nmea_tcp_rejected_full", 0) + 1)
+        await _close_writer(writer)
         return
 
-    if not add_client(writer, asyncio.current_task()):
-        log("WARN", "GNSS", "NMEA-TCP: too many clients; rejecting %s" % (peer,))
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
-        return
-
-    log("INFO", "GNSS", "NMEA-TCP: Client %s connected (%d open)."
-        % (peer, len(clients)))
+    admitted = False
     try:
-        # Keep open until the opposite side leaves. Read only to notice the connection
-        # end.
-        while not shutdown_event.is_set():
-            data = await reader.read(64)
-            if not data:
-                break
-    except Exception:
-        pass
-    finally:
-        remove_client(writer)
-        log("INFO", "GNSS", "NMEA-TCP: Client %s disconnected (%d open)."
-            % (peer, len(clients)))
+        if CONFIG.get("nmea_tcp_auth_required", True):
+            pending_auth += 1
+            try:
+                authenticated = await _authenticate_client(reader, writer, started)
+            finally:
+                pending_auth -= 1
+        else:
+            authenticated = True
+
+        if not authenticated:
+            app.stats["nmea_tcp_auth_failures"] = (
+                app.stats.get("nmea_tcp_auth_failures", 0) + 1)
+            log("WARN", "GNSS", "NMEA-TCP: Authentication rejected (%s)." % (peer,))
+            return
+        if epoch != _rotation_epoch:
+            log("INFO", "GNSS",
+                "NMEA-TCP: stream token rotated during handshake; closing %s." % (peer,))
+            return
+
+        # No await between pending_auth -= 1 and add_client: the sum stays in the limit.
+        session = add_client(writer, asyncio.current_task())
+        if session is None:
+            log("WARN", "GNSS", "NMEA-TCP: too many clients; rejecting %s" % (peer,))
+            return
+        admitted = True
+        session.start()
+
+        log("INFO", "GNSS", "NMEA-TCP: Client %s connected as #%d (%d open)."
+            % (peer, session.stats["id"], len(clients)))
         try:
-            writer.close()
-            await writer.wait_closed()
+            # Keep open until the opposite side leaves. Read only to notice the
+            # connection end.
+            while not shutdown_event.is_set():
+                data = await reader.read(64)
+                if not data:
+                    break
         except Exception:
             pass
+    finally:
+        removed = remove_client(writer) if admitted else False
+        if admitted:
+            log("INFO", "GNSS", "NMEA-TCP: Client %s disconnected (%d open)."
+                % (peer, len(clients)))
+        # Whoever ended the session (writer failure, rotation) closes the socket.
+        if not admitted or removed:
+            await _close_writer(writer)
 
 
 def nmea_tcp_ports():
@@ -219,6 +431,8 @@ async def nmea_tcp_task():
         return
 
     servers = []
+    # No except: a server failure must reach supervise(), which logs, counts and
+    # restarts; a normal return would leave the service down.
     try:
         for port in ports:
             try:
@@ -234,10 +448,6 @@ async def nmea_tcp_task():
             % ", ".join(str(p) for p in aktive_ports))
         while not shutdown_event.is_set():
             await asyncio.sleep(1)
-    except Exception as e:
-        log("ERROR", "GNSS", "NMEA-TCP-server failed.",
-            print_traceback=True, exception=e)
-        app.log_error("NMEA_TCP", str(e))
     finally:
         for _port, srv in servers:
             try:

@@ -7,14 +7,23 @@ import json
 from rawrepl import with_retry
 
 PREFIX = "scale-benchmark-v15"
+# Set a limit in every tracking module that binds it: the limits are read from
+# the module globals of the package parts, not from the tracking facade.
+TRACKING_SET = """import sys
+def _tset(n,v):
+ for k in list(sys.modules):
+  if k=='tracking' or k.startswith('tracking.'):
+   m=sys.modules[k]
+   if hasattr(m,n):setattr(m,n,v)
+"""
 
 
 def program(points, cleanup, segment_kib=128):
-    return """import gc,os,time,tracking,pointstore,ujson
+    return TRACKING_SET + """import gc,os,time,tracking,pointstore,ujson
 from machine import WDT
 wdt=WDT(0,3600000)
 p=%r
-tracking.SEGMENT_MAX_BYTES=%d*1024
+_tset('SEGMENT_MAX_BYTES',%d*1024)
 pointstore.POINT_SEGMENT_BYTES=%d*1024
 def clean():
  for n in list(os.listdir()):
@@ -23,13 +32,13 @@ def clean():
    except OSError: pass
 if %r: clean()
 t=tracking.Tracker(p)
-tracking.MAX_FEATURES=max(tracking.TARGET_MAX_FEATURES,%d)
+_tset('MAX_FEATURES',max(tracking.TARGET_MAX_FEATURES,%d))
 if not t.projects:
  t.create_project('Synthetic benchmark');t.start_line('Synthetic line',0)
-f={'lat':40.0,'lon':10.0,'alt':100.0,'qual':4,'fix_status_text':'RTK_FIXED','sats':24,'hdop':0.6,'correction_age_sec':0.5,'station_id':'SYNTHETIC','receiver_accuracy':{'source':'NMEA_GST','semi_major_sigma_m':0.02,'altitude_sigma_m':0.04}}
+f={'lat':40.0,'lon':10.0,'alt':100.0,'lat_e8':4000000000,'lon_e8':1000000000,'alt_mm':100000,'qual':4,'fix_status_text':'RTK_FIXED','sats':24,'hdop':0.6,'correction_age_sec':0.5,'station_id':'SYNTHETIC','receiver_accuracy':{'source':'NMEA_GST','semi_major_sigma_m':0.02,'altitude_sigma_m':0.04}}
 done=t.feature_count();minimum=gc.mem_free();started=time.ticks_ms()
 while done<%d:
- f['lon']=10.0+done*.000001;t.add_vertex(f,source='automatic');done+=1
+ f['lon']=10.0+done*.000001;f['lon_e8']=1000000000+done*100;t.add_vertex(f,source='automatic');done+=1
  if done%%25==0: gc.collect();minimum=min(minimum,gc.mem_free());wdt.feed()
 append_ms=time.ticks_diff(time.ticks_ms(),started);started=time.ticks_ms();t.compact();checkpoint_ms=time.ticks_diff(time.ticks_ms(),started)
 started=time.ticks_ms();r=tracking.Tracker(p);start_ms=time.ticks_diff(time.ticks_ms(),started);started=time.ticks_ms();export_bytes=sum(len(x) for x in r.iter_backup_ndjson());export_ms=time.ticks_diff(time.ticks_ms(),started)

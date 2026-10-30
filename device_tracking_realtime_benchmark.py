@@ -4,13 +4,14 @@
 import argparse
 import json
 
+from device_tracking_benchmark import TRACKING_SET
 from rawrepl import with_retry
 
 PREFIX = "realtime-benchmark-v15"
 
 
 def program(points, cleanup):
-    return """import gc,os,time,ujson,uasyncio as asyncio,tracking
+    return TRACKING_SET + """import gc,os,time,ujson,uasyncio as asyncio,tracking
 from machine import WDT
 wdt=WDT(0,3600000);p=%r
 def clean():
@@ -19,9 +20,9 @@ def clean():
    try:os.remove(n)
    except OSError:pass
 if %r:clean()
-t=tracking.Tracker(p);tracking.MAX_FEATURES=tracking.TARGET_MAX_FEATURES
+t=tracking.Tracker(p);_tset('MAX_FEATURES',tracking.TARGET_MAX_FEATURES)
 t.create_project('Synthetic realtime benchmark');t.start_line('Synthetic line',0)
-f={'lat':40.0,'lon':10.0,'alt':100.0,'qual':4,'fix_status_text':'RTK_FIXED','sats':24,'hdop':0.6,'correction_age_sec':0.5,'station_id':'SYNTHETIC','receiver_accuracy':{'source':'NMEA_GST','semi_major_sigma_m':0.02,'altitude_sigma_m':0.04}}
+f={'lat':40.0,'lon':10.0,'alt':100.0,'lat_e8':4000000000,'lon_e8':1000000000,'alt_mm':100000,'qual':4,'fix_status_text':'RTK_FIXED','sats':24,'hdop':0.6,'correction_age_sec':0.5,'station_id':'SYNTHETIC','receiver_accuracy':{'source':'NMEA_GST','semi_major_sigma_m':0.02,'altitude_sigma_m':0.04}}
 lat=[];lag=[];running=True;minimum=gc.mem_free()
 async def heartbeat():
  global minimum
@@ -32,7 +33,7 @@ async def record():
  global running
  due=time.ticks_ms()
  for n in range(%d):
-  f['lon']=10.0+n*.000001;started=time.ticks_ms();t.add_vertex(f,source='automatic');lat.append(max(0,time.ticks_diff(time.ticks_ms(),started)))
+  f['lon']=10.0+n*.000001;f['lon_e8']=1000000000+n*100;started=time.ticks_ms();t.add_vertex(f,source='automatic');lat.append(max(0,time.ticks_diff(time.ticks_ms(),started)))
   due=time.ticks_add(due,1000);await asyncio.sleep_ms(max(0,time.ticks_diff(due,time.ticks_ms())))
  running=False
 async def main():

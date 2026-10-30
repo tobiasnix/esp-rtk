@@ -4,7 +4,8 @@
 import unittest
 from unittest import mock
 
-from support import cfg, state
+import support
+from support import cfg, exact_fix, state
 
 
 class TestFixQualitySeconds(unittest.TestCase):
@@ -12,9 +13,9 @@ class TestFixQualitySeconds(unittest.TestCase):
         self.app = state.AppState()
 
     def fix(self, qual):
-        return {"qual": qual, "sats": 10, "hdop": 1.0,
-                "fix_status_text": cfg.FIX_STATUS.get(qual, "UNKNOWN"),
-                "lat": 1.0, "lon": 2.0, "alt": 100.0, "raw": "$GNGGA,x*00"}
+        return exact_fix({"qual": qual, "sats": 10, "hdop": 1.0,
+                          "fix_status_text": cfg.FIX_STATUS.get(qual, "UNKNOWN"),
+                          "lat": 1.0, "lon": 2.0, "alt": 100.0, "raw": "$GNGGA,x*00"})
 
     def test_begins_empty(self):
         self.assertEqual(self.app.stats["fix_quality_seconds"], {})
@@ -48,6 +49,23 @@ class TestFixQualitySeconds(unittest.TestCase):
     def test_update_fix_counts(self):
         self.app.update_fix(self.fix(5))
         self.assertIn("5", self.app.stats["fix_quality_seconds"])
+
+    def test_fix_status_change_with_a_missing_hdop_is_logged(self):
+        # An empty HDOP field in the GGA sentence parses to None; the status
+        # log line must not raise when the fix status changes.
+        fix = self.fix(1)
+        fix["hdop"] = None
+        with support.patch_module_global("state", "log") as log:
+            self.app.update_fix(fix)
+        message = [call.args[2] for call in log.call_args_list
+                   if call.args[2].startswith("Fix: ")]
+        self.assertEqual(len(message), 1)
+        self.assertIn("HDOP: n/a", message[0])
+
+    def test_fix_status_change_with_hdop_keeps_one_decimal(self):
+        with support.patch_module_global("state", "log") as log:
+            self.app.update_fix(self.fix(1))
+        self.assertTrue(any("HDOP: 1.0" in call.args[2] for call in log.call_args_list))
 
     def test_overflow_of_the_clock_does_not_produce_negative_times(self):
         # ticks_ms runs over to MicroPython; ticks_diff does this, but a jump must not

@@ -1,12 +1,27 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Tests for the $PESPS contract and its non-blocking queue."""
 import unittest
+from unittest import mock
 
 from support import cfg, state
 import esptel
 
 
 class TestPESPS(unittest.TestCase):
+    def test_published_ntrip_states_stay_seven(self):
+        self.assertEqual(state.NTRIP_STATES, ("disabled", "waiting_wifi", "connecting",
+            "streaming", "backoff", "auth_error", "mount_error"))
+        for value in state.NTRIP_STATES:
+            self.assertEqual(esptel.pesps_ntrip_state(value), value)
+        for value in ("exhausted", "caster_error", "protocol_error", "stale", None, ""):
+            self.assertEqual(esptel.pesps_ntrip_state(value), "backoff")
+
+    def test_sentence_maps_an_internal_state_before_publishing(self):
+        task = esptel.EspTelemetryTask(None, None)
+        with mock.patch.dict(state.app.stats, {"ntrip_state": "exhausted"}), \
+                mock.patch.object(esptel, "_rssi", return_value=None):
+            self.assertIn(",backoff,", task.sentence())
+
     def test_exact_versioned_set_with_checksum(self):
         result = esptel.build_pesps("A1B2C3D4E5F6", 42, "streaming", 0.4,
                                     12345, ["MSM7", "MSM4"], -61,

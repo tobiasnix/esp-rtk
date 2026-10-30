@@ -84,8 +84,9 @@
           totalRam && Number(board.ram_free_bytes) / totalRam < .15 ? "critical" : ""],
         ["IDF-Heap", mb(board.idf_heap_free_bytes), ""],
         ["Flash", mb(board.flash_bytes), ""],
+        // 20 % matches the device's flash reserve (tracking.MIN_FLASH_RESERVE_PERCENT).
         ["File system", mb(board.fs_free_bytes) + " / " + mb(board.fs_total_bytes),
-          board.fs_total_bytes && Number(board.fs_free_bytes) / Number(board.fs_total_bytes) < .1 ? "critical" : ""],
+          board.fs_total_bytes && Number(board.fs_free_bytes) / Number(board.fs_total_bytes) < .2 ? "critical" : ""],
         ["Chip", board.mcu_temp_c == null ? "-" : board.mcu_temp_c + " °C",
           board.mcu_temp_c >= 80 ? "critical" : board.mcu_temp_c >= 65 ? "warn" : ""],
         ["SSID", stats.wifi_ssid_aktiv || "-", ""],
@@ -152,15 +153,52 @@
         button.disabled = false; button.value = tr("ui.save_again","Save again");
       }
     });
+    // The scan answers 202 {"status":"pending"} until the radio has finished,
+    // like the field app, so poll it; every request, body included, has a
+    // deadline so a dropped access point can never leave the button disabled.
+    const SCAN_ATTEMPTS = 16, SCAN_DELAY_MS = 750, SCAN_REQUEST_TIMEOUT_MS = 8000;
+    const scanRequest = () => {
+      const controller = typeof AbortController === "function" ? new AbortController() : null;
+      let timer;
+      const deadline = new Promise((resolve, reject) => {
+        timer = setTimeout(() => {
+          if (controller) controller.abort();
+          reject(new Error(tr("ui.scan_no_answer","The device did not answer in time.")));
+        }, SCAN_REQUEST_TIMEOUT_MS);
+      });
+      const request = (async () => {
+        const response = await fetch("/api/wifi-scan", controller ? {signal: controller.signal} : undefined);
+        // Only a refusal may lack a JSON body; a successful answer whose body
+        // cannot be read or parsed is a failed scan, not an empty one.
+        const result = response.ok ? await response.json() : await response.json().catch(() => ({}));
+        return {response, result};
+      })();
+      request.catch(() => {});
+      return Promise.race([request, deadline]).then(
+        value => { clearTimeout(timer); return value; },
+        error => { clearTimeout(timer); throw error; });
+    };
     byId("wifi-scan").addEventListener("click", async event => {
       const button = event.currentTarget, state = byId("wifi-scan-state"), select = byId("wifi-results");
       button.disabled = true; setStatus(state, tr("ui.searching","Searching …"));
       try {
-        const response = await fetch("/api/wifi-scan"), result = await response.json();
-        if (!response.ok) throw new Error(result.error || response.status);
+        let answer = await scanRequest(), attempt = 0;
+        while (answer.response.status === 202 && answer.result.status === "pending" && attempt < SCAN_ATTEMPTS) {
+          attempt += 1;
+          setStatus(state, tr("ui.searching","Searching …"));
+          await new Promise(resolve => setTimeout(resolve, SCAN_DELAY_MS));
+          answer = await scanRequest();
+        }
+        const response = answer.response, result = answer.result;
+        if (response.status === 202 && result.status === "pending") {
+          setStatus(state, tr("ui.scan_still_running","The scan is still running. Try again in a moment."), "warn");
+          return;
+        }
+        if (!response.ok) throw new Error(result.message || result.error || ("HTTP " + response.status));
+        const networks = result.networks || [];
         select.replaceChildren(new Option(tr("ui.choose_wifi_dots","Choose Wi-Fi network ..."), ""));
-        result.networks.forEach(network => select.add(new Option(network.ssid + " (" + network.rssi + " dBm, " + tr(network.secured ? "ui.secured" : "ui.open", network.secured ? "secured" : "open") + ")", network.ssid)));
-        select.hidden = false; setStatus(state, result.networks.length + " " + tr("ui.networks_found","Wi-Fi networks found"));
+        networks.forEach(network => select.add(new Option(network.ssid + " (" + network.rssi + " dBm, " + tr(network.secured ? "ui.secured" : "ui.open", network.secured ? "secured" : "open") + ")", network.ssid)));
+        select.hidden = false; setStatus(state, networks.length + " " + tr("ui.networks_found","Wi-Fi networks found"));
       } catch (error) { setStatus(state, tr("ui.scan_failed","Scan failed:") + " " + error.message, "critical"); }
       finally { button.disabled = false; }
     });

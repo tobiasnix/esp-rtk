@@ -1,0 +1,562 @@
+{
+ "live_loaded": {
+  "active_line": {
+   "auto_distance_m": 1.0,
+   "id": "line-6acb4e80-0002",
+   "last_point": {
+    "age_sec": 0,
+    "h_sigma_m": 0.01,
+    "label": "V-1"
+   },
+   "length_m": 0.0,
+   "name": "L-1",
+   "pause_reason": null,
+   "recording_mode": "survey",
+   "recording_sec": 0,
+   "state": "recording",
+   "vertex_count": 1
+  },
+  "active_project": {
+   "frames": {
+    "unknown": 1
+   },
+   "id": "project-6acb4e80-0001",
+   "line_count": 1,
+   "mixed_frames": false,
+   "name": "Contract",
+   "point_count": 0,
+   "unknown_frames": true
+  },
+  "board": {
+   "cpu_hz": 160000000,
+   "flash_bytes": 8388608,
+   "fs_free_bytes": 5242880,
+   "fs_total_bytes": 6291456,
+   "mcu_temp_c": 46,
+   "ram_alloc_bytes": 40000,
+   "ram_free_bytes": 8300000,
+   "rssi_dbm": -61
+  },
+  "capacity": {
+   "active_projects": 1,
+   "archived_projects": 0,
+   "estimated_temporary_bytes": 16384,
+   "free_flash_bytes": 8000000,
+   "level": "ok",
+   "limit": 5000,
+   "percent": 0,
+   "remaining": 4999,
+   "required_flash_reserve_bytes": 3000000,
+   "used": 1,
+   "writable": true
+  },
+  "config_warnings": [],
+  "current_fix": {
+   "alt": 100.0,
+   "alt_mm": 100000,
+   "correction_age_sec": 1.0,
+   "fix_age_ms": 200,
+   "fix_rev": 0,
+   "fix_seq": 0,
+   "fix_status_text": "RTK_FIXED",
+   "hdop": 0.6,
+   "lat": 50.0,
+   "lat_e8": 5000000000,
+   "lon": 8.0,
+   "lon_e8": 800000000,
+   "pending_gst": false,
+   "qual": 4,
+   "receiver_accuracy": {
+    "altitude_sigma_m": 0.02,
+    "horizontal_sigma_m": 0.01
+   },
+   "sats": 24,
+   "stale": false,
+   "utc": "120000.00"
+  },
+  "current_quality": {
+   "accepted": true,
+   "limits": {
+    "fix_quality": "RTK_FIXED",
+    "max_correction_age_sec": 5.0,
+    "max_gst_horizontal_sigma_m": 0.05,
+    "max_gst_vertical_sigma_m": 0.1,
+    "max_hdop": 1.5,
+    "max_horizontal_spread_m": 0.05,
+    "min_satellites": 10,
+    "quality_window_samples": 5
+   },
+   "reasons": []
+  },
+  "device_time": 845024000,
+  "field_diagnostics": {
+   "boot": 12,
+   "dropped_events": 0,
+   "dropped_nmea": 0,
+   "dropped_rtcm_bytes": 0,
+   "enabled": true,
+   "error": null,
+   "flush_interval_ms": 5000,
+   "limit_bytes": 1048576,
+   "max_write_ms": 12,
+   "pending_nmea": 0,
+   "pending_records": 1,
+   "rotations_this_boot": 0,
+   "sample_interval_ms": 1000,
+   "samples_this_boot": 40,
+   "segments": 2,
+   "session": 3,
+   "stored_bytes": 20480
+  },
+  "gate_deviations": [],
+  "gnss_accuracy": {
+   "attempts": 0,
+   "state": "waiting"
+  },
+  "measurement_progress": {
+   "active": false,
+   "cancelled": false,
+   "collected": 0,
+   "elapsed_sec": 0,
+   "mean_alt_m": null,
+   "mean_h_sigma_m": null,
+   "mean_v_sigma_m": null,
+   "mode": "fixed",
+   "phase": "idle",
+   "rejected_samples": 0,
+   "total": 0,
+   "waiting_reasons": []
+  },
+  "network": {
+   "access_state": "CONNECTING",
+   "last_wifi_error": null,
+   "net_mode": "INIT",
+   "ntrip_state": "disabled",
+   "ntrip_substate": null,
+   "reconnects": 0,
+   "wifi_status_code": null
+  },
+  "persistence": {
+   "last_append_ms": 0,
+   "max_append_ms": 0,
+   "pending_index_events": 1
+  },
+  "quality_streak": {
+   "fix_quality": 4,
+   "gate_accepted": true,
+   "gate_streak_sec": 0,
+   "since_rtk_fixed_sec": 65,
+   "streak_sec": 65
+  },
+  "revision": 3,
+  "route_startup": null,
+  "rtcm": {
+   "arrival_age_sec": 1.2,
+   "bytes_total": 1840,
+   "epoch_age_sec": 2.0,
+   "epoch_source": "gps",
+   "last_msg_age_sec": 1.2,
+   "messages": {
+    "1005": 1,
+    "1077": 3,
+    "1087": 3
+   },
+   "mount": "",
+   "msm": [
+    "MSM7"
+   ],
+   "stale": false
+  },
+  "schema_version": 1,
+  "system": {
+   "boot_count": 12,
+   "display_name": "Rover 1",
+   "uptime_sec": 3600,
+   "version": "ESP-RTK V15.10.4"
+  },
+  "tracking_startup": {
+   "state": "ready"
+  },
+  "undo_candidate": {
+   "feature_id": "line-6acb4e80-0002",
+   "kind": "vertex",
+   "label": "L-1 \u00b7 V-1",
+   "line_id": "line-6acb4e80-0002"
+  }
+ },
+ "live_loading": {
+  "active_line": null,
+  "active_line_id": null,
+  "active_project": null,
+  "active_project_id": null,
+  "active_project_lines": [],
+  "archives": [],
+  "board": {
+   "cpu_hz": 160000000,
+   "flash_bytes": 8388608,
+   "fs_free_bytes": 5242880,
+   "fs_total_bytes": 6291456,
+   "mcu_temp_c": 46,
+   "ram_alloc_bytes": 40000,
+   "ram_free_bytes": 8300000,
+   "rssi_dbm": -61
+  },
+  "capacity": {
+   "level": "loading",
+   "limit": 5000,
+   "recording_allowed": false,
+   "used": 0,
+   "writable": false
+  },
+  "config_warnings": [],
+  "current_fix": {
+   "alt": 100.0,
+   "alt_mm": 100000,
+   "correction_age_sec": 1.0,
+   "fix_age_ms": 200,
+   "fix_rev": 0,
+   "fix_seq": 0,
+   "fix_status_text": "RTK_FIXED",
+   "hdop": 0.6,
+   "lat": 50.0,
+   "lat_e8": 5000000000,
+   "lon": 8.0,
+   "lon_e8": 800000000,
+   "pending_gst": false,
+   "qual": 4,
+   "receiver_accuracy": {
+    "altitude_sigma_m": 0.02,
+    "horizontal_sigma_m": 0.01
+   },
+   "sats": 24,
+   "stale": false,
+   "utc": "120000.00"
+  },
+  "current_quality": {
+   "accepted": true,
+   "limits": {
+    "fix_quality": "RTK_FIXED",
+    "max_correction_age_sec": 5.0,
+    "max_gst_horizontal_sigma_m": 0.05,
+    "max_gst_vertical_sigma_m": 0.1,
+    "max_hdop": 1.5,
+    "max_horizontal_spread_m": 0.05,
+    "min_satellites": 10,
+    "quality_window_samples": 5
+   },
+   "reasons": []
+  },
+  "device_time": 845024000,
+  "field_diagnostics": {
+   "boot": 12,
+   "dropped_events": 0,
+   "dropped_nmea": 0,
+   "dropped_rtcm_bytes": 0,
+   "enabled": true,
+   "error": null,
+   "flush_interval_ms": 5000,
+   "limit_bytes": 1048576,
+   "max_write_ms": 12,
+   "pending_nmea": 0,
+   "pending_records": 1,
+   "rotations_this_boot": 0,
+   "sample_interval_ms": 1000,
+   "samples_this_boot": 40,
+   "segments": 2,
+   "session": 3,
+   "stored_bytes": 20480
+  },
+  "gate_deviations": [],
+  "gnss_accuracy": {
+   "attempts": 0,
+   "state": "waiting"
+  },
+  "measurement_progress": {
+   "active": false,
+   "cancelled": false,
+   "collected": 0,
+   "elapsed_sec": 0,
+   "mean_alt_m": null,
+   "mean_h_sigma_m": null,
+   "mean_v_sigma_m": null,
+   "mode": "fixed",
+   "phase": "idle",
+   "rejected_samples": 0,
+   "total": 0,
+   "waiting_reasons": []
+  },
+  "network": {
+   "access_state": "CONNECTING",
+   "last_wifi_error": null,
+   "net_mode": "INIT",
+   "ntrip_state": "disabled",
+   "ntrip_substate": null,
+   "reconnects": 0,
+   "wifi_status_code": null
+  },
+  "projects": [],
+  "quality_streak": {
+   "fix_quality": 4,
+   "gate_accepted": true,
+   "gate_streak_sec": 0,
+   "since_rtk_fixed_sec": 65,
+   "streak_sec": 65
+  },
+  "revision": 0,
+  "route_startup": null,
+  "rtcm": {
+   "arrival_age_sec": 1.2,
+   "bytes_total": 1840,
+   "epoch_age_sec": 2.0,
+   "epoch_source": "gps",
+   "last_msg_age_sec": 1.2,
+   "messages": {
+    "1005": 1,
+    "1077": 3,
+    "1087": 3
+   },
+   "mount": "",
+   "msm": [
+    "MSM7"
+   ],
+   "stale": false
+  },
+  "schema_version": 1,
+  "system": {
+   "boot_count": 12,
+   "display_name": "Rover 1",
+   "uptime_sec": 3600,
+   "version": "ESP-RTK V15.10.4"
+  },
+  "tracking_startup": {
+   "state": "loading"
+  },
+  "undo_candidate": null
+ },
+ "status": {
+  "ble": {
+   "clients": 1,
+   "drops": 0,
+   "encrypted_clients": 1,
+   "payload_bytes": 180
+  },
+  "board": {
+   "cpu_hz": 160000000,
+   "flash_bytes": 8388608,
+   "fs_free_bytes": 5242880,
+   "fs_total_bytes": 6291456,
+   "mcu_temp_c": 46,
+   "ram_alloc_bytes": 40000,
+   "ram_free_bytes": 8300000,
+   "rssi_dbm": -61
+  },
+  "config_warnings": [],
+  "field_diagnostics": {
+   "boot": 12,
+   "dropped_events": 0,
+   "dropped_nmea": 0,
+   "dropped_rtcm_bytes": 0,
+   "enabled": true,
+   "error": null,
+   "flush_interval_ms": 5000,
+   "limit_bytes": 1048576,
+   "max_write_ms": 12,
+   "pending_nmea": 0,
+   "pending_records": 1,
+   "rotations_this_boot": 0,
+   "sample_interval_ms": 1000,
+   "samples_this_boot": 40,
+   "segments": 2,
+   "session": 3,
+   "stored_bytes": 20480
+  },
+  "fix": {
+   "alt": 100.0,
+   "alt_mm": 100000,
+   "correction_age_sec": 1.0,
+   "fix_age_ms": 200,
+   "fix_rev": 0,
+   "fix_seq": 0,
+   "fix_status_text": "RTK_FIXED",
+   "hdop": 0.6,
+   "lat": 50.0,
+   "lat_e8": 5000000000,
+   "lon": 8.0,
+   "lon_e8": 800000000,
+   "pending_gst": false,
+   "qual": 4,
+   "receiver_accuracy": {
+    "altitude_sigma_m": 0.02,
+    "horizontal_sigma_m": 0.01
+   },
+   "sats": 24,
+   "stale": false,
+   "utc": "120000.00"
+  },
+  "fix_age_sec": 0.2,
+  "gate_deviations": [],
+  "heartbeat_age_sec": {
+   "gnss": 0.4,
+   "ntrip": 1.5,
+   "web": 0.1
+  },
+  "log_entries": 7,
+  "nmea_tcp": {
+   "clients": 0,
+   "drops": 0,
+   "port": 10110,
+   "ports": [
+    10110,
+    2947
+   ]
+  },
+  "ntrip_flow": {
+   "connect_max_ms": 0,
+   "connect_ms": 0,
+   "connections": 0,
+   "dns_max_ms": 0,
+   "dns_ms": 0,
+   "dns_unseparated": 0,
+   "gga_failures": 0,
+   "gga_gap_max_ms": 0,
+   "gga_write_max_ms": 0,
+   "gga_write_ms": 0,
+   "gga_writes": 0,
+   "last_gga_ticks_ms": null,
+   "last_rx_ticks_ms": null,
+   "observed_ticks_ms": 500000000,
+   "phase": "idle",
+   "phase_age_ms": 0,
+   "phase_since_ms": 500000000,
+   "read_attempts": 0,
+   "read_timeouts": 0,
+   "read_wait_max_ms": 0,
+   "read_wait_ms": 0,
+   "rx_age_ms": null,
+   "rx_bytes": 0,
+   "rx_chunks": 0,
+   "rx_gap_max_ms": 0,
+   "rx_gap_ms": 0,
+   "schema": 1,
+   "uart_bytes": 0,
+   "uart_short_writes": 0,
+   "uart_write_max_ms": 0,
+   "uart_write_ms": 0,
+   "uart_writes": 0
+  },
+  "quality_streak": {
+   "fix_quality": 4,
+   "gate_accepted": true,
+   "gate_streak_sec": 0,
+   "since_rtk_fixed_sec": 65,
+   "streak_sec": 65
+  },
+  "recent_errors": [
+   {
+    "error": "timeout",
+    "source": "NTRIP",
+    "time": 41
+   }
+  ],
+  "rtcm": {
+   "arrival_age_sec": 1.2,
+   "bytes_total": 1840,
+   "epoch_age_sec": 2.0,
+   "epoch_source": "gps",
+   "last_msg_age_sec": 1.2,
+   "messages": {
+    "1005": 1,
+    "1077": 3,
+    "1087": 3
+   },
+   "mount": "",
+   "msm": [
+    "MSM7"
+   ],
+   "stale": false
+  },
+  "stats": {
+   "access_state": "CONNECTING",
+   "ap_ip": "192.168.4.1",
+   "ble_auth_failures": 0,
+   "ble_drops": 0,
+   "boot_count": 12,
+   "crc_errors": 0,
+   "fix_quality_seconds": {
+    "4": 0
+   },
+   "gga_parse_errors": 0,
+   "gga_parse_over_budget": 0,
+   "gga_parse_us": 0,
+   "gga_parse_us_avg": 0,
+   "gga_parse_us_max": 0,
+   "gnss_msgs": 0,
+   "http_errors": 0,
+   "http_rejected_requests": 0,
+   "http_requests": 0,
+   "last_ntrip_error": "N/A",
+   "last_wifi_error": null,
+   "legacy_conversion_errors": 0,
+   "loop_lag_max_ms": 0,
+   "loop_lag_ms": 0,
+   "net_mode": "INIT",
+   "nmea_last_crc_error": null,
+   "nmea_tcp_client_stats": [],
+   "nmea_tcp_drops": 0,
+   "nmea_tcp_rejected_full": 0,
+   "ntrip_backoff_sec": 0,
+   "ntrip_bytes": 0,
+   "ntrip_endpoint": null,
+   "ntrip_gga_sent": 0,
+   "ntrip_retries": 0,
+   "ntrip_state": "disabled",
+   "ntrip_substate": null,
+   "queue_overflows": 0,
+   "reset_cause": "PWRON",
+   "route_invalid_fixes": 0,
+   "route_rejected_points": 0,
+   "safe_mode": false,
+   "sta_ip": "N/A",
+   "task_restarts": 0,
+   "tcp_auth_failures": 0,
+   "tcp_client_queue_max": 0,
+   "telemetry_drops": 0,
+   "tracking_appends_over_1000ms": 0,
+   "tracking_max_append_ms": 0,
+   "tracking_queue_depth": 0,
+   "tracking_queue_overflows": 0,
+   "tracking_write_errors": 0,
+   "uart_buffer_overflows": 0,
+   "uart_last_buffer_overflow": null,
+   "uart_last_read_bytes": 0,
+   "uart_last_read_duration_ms": 0,
+   "uart_last_read_ticks_ms": null,
+   "uart_read_gap_max_ms": 0,
+   "uart_read_gap_ms": 0,
+   "uart_rx_available_max": 0,
+   "uart_rx_bytes": 0,
+   "uart_rx_chunk_max": 0,
+   "uart_rx_rate_bytes_sec": 0,
+   "uart_rx_rate_max_bytes_sec": 0,
+   "uart_rx_rate_window_ms": 0,
+   "uart_rx_reads": 0,
+   "uptime_sec": 3600,
+   "wifi_reconnects": 0,
+   "wifi_ssid_aktiv": "",
+   "wifi_status_code": null
+  },
+  "system": {
+   "boot_count": 12,
+   "device_id": "esp-rtk-a1b2c3",
+   "display_name": "Rover 1",
+   "hostname": "esp-rtk",
+   "ip": "N/A",
+   "mac": "a1:b2:c3:d4:e5:f6",
+   "ram_free_bytes": 8300000,
+   "reset_cause": "PWRON",
+   "safe_mode": false,
+   "uptime_sec": 3600,
+   "version": "ESP-RTK V15.10.4"
+  }
+ }
+}

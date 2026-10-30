@@ -6,6 +6,7 @@ __pycache__/
 config.json
 config.json.tmp
 config.json.previous
+config.json.unreadable
 config.pending.json
 config.pending.json.tmp
 config.pending.json.previous

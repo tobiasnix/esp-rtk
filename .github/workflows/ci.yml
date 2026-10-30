@@ -10,6 +10,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
@@ -22,6 +23,8 @@ jobs:
           node-version: "22"
       - name: Install host-tool dependencies
         run: python3 -m pip install -r requirements.txt
+      - name: Committed build matches src/
+        run: python3 push.py . --build-only --check
       - name: Unit tests, language gate, and repository checks
         shell: bash
         run: |
@@ -42,7 +45,7 @@ jobs:
         run: python3 -m compileall -q .
       - name: Check JavaScript syntax
         run: |
-          for file in *.js tests/*.js; do
+          for file in *.js src/*.js tests/*.js; do
             node --check "$file"
           done
       - name: Check repository hygiene
@@ -56,3 +59,24 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  browser:
+    # The suites take about an hour in one job; four balanced shards run in parallel.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Install host-tool dependencies
+        run: python3 -m pip install -r requirements.txt
+      - name: Browser acceptance (Playwright mock harness, shard ${{ matrix.shard }})
+        run: python3 tests/browser_acceptance.py --install --with-deps --shard ${{ matrix.shard }}

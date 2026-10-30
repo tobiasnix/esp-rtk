@@ -1,0 +1,13 @@
+# gitleaks configuration for CI: the default rules, plus an allowlist for the
+# synthetic tokens the tests use (hex counting sequences, not secrets).
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic test tokens"
+regexTarget = "secret"
+regexes = [
+  '''^0123456789abcdef$''',
+  '''^fedcba9876543210$''',
+  '''^abcdef0123456789$''',
+]

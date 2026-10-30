@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """NMEA processing: checksum, coordinates, and GGA parsing."""
+import struct
 import unittest
+from unittest import mock
 
 from support import cfg, gnss, sentence
+import geo
 
 # The classic from the NMEA documentation - checksum occupies externally.
 GGA_WIKI = "$GPGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,*47"
@@ -64,31 +67,6 @@ class TestChecksum(unittest.TestCase):
         self.assertTrue(self.check("$PQTMVERNO*58"))
 
 
-class TestKoordinaten(unittest.TestCase):
-    def deg(self, coord, hemi):
-        return gnss.GNSSHandler.nmea_to_deg(coord, hemi)
-
-    def test_nord(self):
-        # 4807.038 = 48 Grad 07,038 Minuten = 48,1173 Grad
-        self.assertAlmostEqual(self.deg("4807.038", "N"), 48.1173, places=4)
-
-    def test_south_is_negative(self):
-        self.assertAlmostEqual(self.deg("4807.038", "S"), -48.1173, places=4)
-
-    def test_ost(self):
-        self.assertAlmostEqual(self.deg("01131.000", "E"), 11.51667, places=4)
-
-    def test_west_is_negative(self):
-        self.assertAlmostEqual(self.deg("00039.259260", "W"), -0.65432, places=4)
-
-    def test_synthetic_position(self):
-        self.assertAlmostEqual(self.deg("0007.407360", "N"), 0.12346, places=5)
-        self.assertAlmostEqual(self.deg("00039.259260", "W"), -0.65432, places=5)
-
-    def test_waste_does_not_become_an_exception(self):
-        self.assertIsNone(self.deg("abc", "N"))
-
-
 class TestParseGga(unittest.TestCase):
     def parse(self, line):
         return gnss.GNSSHandler.parse_gga(_Dummy(), line)
@@ -135,6 +113,250 @@ class TestParseGga(unittest.TestCase):
             self.assertTrue(name)
             self.assertIsInstance(qual, int)
 
+    def test_exact_integer_fields(self):
+        fix = self.parse(GGA_RTK)
+        self.assertEqual(fix["lat_e8"], 12345600)
+        self.assertEqual(fix["lon_e8"], -65432100)
+        self.assertEqual(fix["alt_mm"], 123456)
+        self.assertEqual(fix["geoid_sep_mm"], 12300)
+        for key in ("lat_e8", "lon_e8", "alt_mm", "geoid_sep_mm"):
+            self.assertIs(type(fix[key]), int, key)
+        # The float fields stay as they were.
+        self.assertAlmostEqual(fix["lat"], 0.12346, places=5)
+        self.assertAlmostEqual(fix["alt"], 123.456)
+
+    def test_integer_fields_are_none_without_fix(self):
+        fix = self.parse(GGA_NOFIX)
+        self.assertIsNone(fix["lat_e8"])
+        self.assertIsNone(fix["lon_e8"])
+        self.assertIsNone(fix["alt_mm"])
+        self.assertIsNone(fix["geoid_sep_mm"])
+
+    def test_missing_altitude_fields_stay_none(self):
+        line = sentence("GNGGA,174608.000,0007.407360,N,00039.259260,W,4,31,0.57,,M,,M,2.0,0054")
+        fix = self.parse(line)
+        self.assertEqual(fix["lat_e8"], 12345600)
+        self.assertIsNone(fix["alt_mm"])
+        self.assertIsNone(fix["geoid_sep_mm"])
+        self.assertIsNone(fix["altitude_ellipsoid_m"])
+
+    def test_heights_are_parsed_once_and_the_floats_follow_the_millimetres(self):
+        floats = []
+
+        def spy_float(value):
+            floats.append(value)
+            return float(value)
+
+        with mock.patch.object(geo, "parse_decimal_fixed",
+                               wraps=geo.parse_decimal_fixed) as spy, \
+                mock.patch.object(gnss, "float", spy_float, create=True):
+            fix = self.parse(GGA_RTK)
+        # One exact parse each for field 9 and field 11, and neither height goes
+        # through float() again: the float fields come from the millimetres.
+        self.assertEqual([call.args[0] for call in spy.call_args_list], ["123.456", "12.3"])
+        self.assertNotIn("123.456", floats)
+        self.assertNotIn("12.3", floats)
+        self.assertEqual(fix["alt"], fix["alt_mm"] / 1000)
+        self.assertEqual(fix["altitude_msl_m"], fix["alt"])
+        self.assertEqual(fix["geoid_sep_m"], fix["geoid_sep_mm"] / 1000)
+        self.assertEqual(fix["altitude_ellipsoid_m"],
+                         (fix["alt_mm"] + fix["geoid_sep_mm"]) / 1000)
+
+    def test_coordinates_never_go_through_float(self):
+        floats = []
+
+        def spy_float(value):
+            floats.append(value)
+            return float(value)
+
+        with mock.patch.object(gnss, "float", spy_float, create=True):
+            fix = self.parse(GGA_RTK)
+        self.assertNotIn("0007.407360", floats)
+        self.assertNotIn("00039.259260", floats)
+        self.assertEqual(fix["lat"], geo.e8_to_deg(fix["lat_e8"]))
+
+    def test_height_with_extra_decimals_is_rounded_to_the_millimetre(self):
+        line = sentence("GNGGA,174608.000,0007.407360,N,00039.259260,W,4,31,0.57,"
+                        "123.4567,M,-12.3004,M,2.0,0054")
+        fix = self.parse(line)
+        self.assertEqual(fix["alt_mm"], 123457)
+        self.assertEqual(fix["geoid_sep_mm"], -12300)
+        self.assertAlmostEqual(fix["alt"], 123.457)
+        self.assertAlmostEqual(fix["geoid_sep_m"], -12.3)
+        self.assertAlmostEqual(fix["altitude_ellipsoid_m"], 111.157)
+
+    def gga(self, lat=("0007.407360", "N"), lon=("00039.259260", "W"),
+            alt="123.456", geoid="12.3"):
+        return sentence("GNGGA,174608.000,%s,%s,%s,%s,4,31,0.57,%s,M,%s,M,2.0,0054" % (
+            lat[0], lat[1], lon[0], lon[1], alt, geoid))
+
+    def assertFloatsFollowIntegers(self, fix, context=None):
+        """No float without its integer, and every float derived from it exactly."""
+        for float_key, exact_key in (("lat", "lat_e8"), ("lon", "lon_e8"), ("alt", "alt_mm"),
+                                     ("altitude_msl_m", "alt_mm"),
+                                     ("geoid_sep_m", "geoid_sep_mm")):
+            self.assertEqual(fix[float_key] is None, fix[exact_key] is None,
+                             (float_key, context))
+        for key, exact in (("lat", "lat_e8"), ("lon", "lon_e8")):
+            if fix[exact] is not None:
+                self.assertEqual(fix[key], geo.e8_to_deg(fix[exact]), (key, context))
+        for key, exact in (("alt", "alt_mm"), ("altitude_msl_m", "alt_mm"),
+                           ("geoid_sep_m", "geoid_sep_mm")):
+            if fix[exact] is not None:
+                self.assertEqual(fix[key], fix[exact] / 1000, (key, context))
+        if fix["alt_mm"] is None or fix["geoid_sep_mm"] is None:
+            self.assertIsNone(fix["altitude_ellipsoid_m"], context)
+        else:
+            self.assertEqual(fix["altitude_ellipsoid_m"],
+                             (fix["alt_mm"] + fix["geoid_sep_mm"]) / 1000, context)
+
+    def test_height_the_exact_parser_refuses_has_no_float(self):
+        # float() would read "1e2"; the exact parser does not, so the height is
+        # missing (both forms) and the position and the geoid stay.
+        for alt in ("1e2", " 12.3"):
+            with self.subTest(alt=alt):
+                fix = self.parse(self.gga(lat=("0007.407360", "N"), alt=alt))
+                self.assertIsNotNone(fix)
+                for key in ("alt", "altitude_msl_m", "alt_mm", "altitude_ellipsoid_m"):
+                    self.assertIsNone(fix[key], key)
+                self.assertEqual(fix["geoid_sep_mm"], 12300)
+                self.assertEqual(fix["lat_e8"], 12345600)
+
+    def test_geoid_the_exact_parser_refuses_has_no_float(self):
+        for geoid in ("1e2", " 12.3"):
+            with self.subTest(geoid=geoid):
+                fix = self.parse(self.gga(geoid=geoid))
+                self.assertIsNotNone(fix)
+                self.assertEqual(fix["alt_mm"], 123456)
+                self.assertEqual(fix["alt"], 123.456)
+                for key in ("geoid_sep_mm", "geoid_sep_m", "altitude_ellipsoid_m"):
+                    self.assertIsNone(fix[key], key)
+
+    def test_garbage_height_leaves_the_position_without_height(self):
+        from state import app
+        errors = app.stats["gga_parse_errors"]
+        fix = self.parse(self.gga(alt="abc", geoid="12.3"))
+        self.assertIsNotNone(fix)
+        self.assertEqual(fix["lat_e8"], 12345600)
+        self.assertIsNone(fix["alt"])
+        self.assertIsNone(fix["alt_mm"])
+        fix = self.parse(self.gga(alt="123.4", geoid="x"))
+        self.assertIsNotNone(fix)
+        self.assertEqual(fix["alt_mm"], 123400)
+        for key in ("geoid_sep_m", "geoid_sep_mm", "altitude_ellipsoid_m"):
+            self.assertIsNone(fix[key], key)
+        self.assertEqual(app.stats["gga_parse_errors"], errors)
+
+    def test_coordinates_the_exact_parser_refuses_have_no_float(self):
+        for lat in (("4012.3456", ""), ("4072.0", "N"), ("-4012.3456", "N"),
+                    ("4012.3456 ", "N"), ("1e3", "N")):
+            with self.subTest(lat=lat):
+                fix = self.parse(self.gga(lat=lat))
+                self.assertIsNotNone(fix)
+                self.assertIsNone(fix["lat"])
+                self.assertIsNone(fix["lat_e8"])
+                self.assertEqual(fix["lon_e8"], -65432100)
+        for lon in (("01000.0000", ""), ("00072.0", "E"), ("1e3", "E")):
+            with self.subTest(lon=lon):
+                fix = self.parse(self.gga(lon=lon))
+                self.assertIsNotNone(fix)
+                self.assertIsNone(fix["lon"])
+                self.assertIsNone(fix["lon_e8"])
+                self.assertEqual(fix["lat_e8"], 12345600)
+
+    def test_every_float_follows_its_integer(self):
+        lines = [GGA_RTK, GGA_NOFIX, GGA_WIKI,
+                 self.gga(alt="1e2"), self.gga(alt=" 12.3"), self.gga(geoid="1e2"),
+                 self.gga(geoid=" 12.3"), self.gga(alt="abc"), self.gga(geoid="x"),
+                 self.gga(alt="", geoid=""), self.gga(alt="-20000.001", geoid="12.34567")]
+        lines += [self.gga(lat=lat) for lat in (("4012.3456", ""), ("4072.0", "N"),
+                                                ("-4012.3456", "N"), ("4012.3456 ", "N"),
+                                                ("1e3", "N"))]
+        lines += [self.gga(lon=lon) for lon in (("01000.0000", ""), ("00072.0", "E"),
+                                                ("1e3", "E"))]
+        for line in lines:
+            with self.subTest(line=line):
+                fix = self.parse(line)
+                self.assertIsNotNone(fix)
+                self.assertFloatsFollowIntegers(fix, line)
+
+    def test_unicode_digits_in_a_coordinate_give_no_position(self):
+        line = sentence("GNGGA,174608.000,\u0660\u0660\u0660\u0667.407360,N,"
+                        "00039.259260,W,4,31,0.57,123.456,M,12.3,M,2.0,0054")
+        fix = self.parse(line)
+        self.assertIsNone(fix["lat_e8"])
+        self.assertEqual(fix["lon_e8"], -65432100)
+
+    def test_integer_fields_never_go_through_float(self):
+        with mock.patch.object(geo, "float", side_effect=AssertionError("float used"),
+                               create=True):
+            fix = self.parse(GGA_RTK)
+        self.assertEqual(fix["lat_e8"], 12345600)
+
+    def test_exact_fields_survive_a_float32_parse_chain(self):
+        # On the device every float() in gnss.py is 32 bits wide. Emulate that
+        # here, and keep geo.py off float() altogether: an e8 value derived from
+        # the float latitude would be off by more than a hundred units (over
+        # 10 cm) instead of the exact integer.
+        float_original = float
+
+        def float32(text):
+            return struct.unpack("f", struct.pack("f", float_original(text)))[0]
+
+        line = sentence("GNGGA,174608.000,5107.407360,N,01000.000000,E,4,31,0.57,"
+                        "123.456,M,12.3,M,2.0,0054")
+        with mock.patch.object(geo, "float", side_effect=AssertionError("float used"),
+                               create=True), \
+                mock.patch.object(gnss, "float", new=float32, create=True):
+            fix = self.parse(line)
+        # The premise, independent of the fix: a 32-bit float has lost about a
+        # tenth of a metre (more than 5e-7 degrees) of this latitude.
+        self.assertGreater(abs(float32("51.123456") - 51.123456), 5e-7)
+        self.assertEqual(fix["lat_e8"], 5112345600)
+        self.assertEqual(fix["lon_e8"], 1000000000)
+        self.assertEqual(fix["lat"], geo.e8_to_deg(fix["lat_e8"]))
+
+    def test_parse_cost_is_published_in_stats(self):
+        self.parse(GGA_RTK)
+        from state import app
+        self.assertIsInstance(app.stats["gga_parse_us"], int)
+        self.assertGreaterEqual(app.stats["gga_parse_us_max"], app.stats["gga_parse_us"])
+
+    def test_parse_cost_tracks_last_and_maximum(self):
+        from state import app
+        with mock.patch.dict(app.stats, {"gga_parse_us": 0, "gga_parse_us_max": 0}), \
+                mock.patch.object(gnss, "_ticks_us", side_effect=[1000, 1042, 2000, 2010]):
+            self.parse(GGA_RTK)
+            self.assertEqual((app.stats["gga_parse_us"], app.stats["gga_parse_us_max"]), (42, 42))
+            self.parse(GGA_RTK)
+            self.assertEqual((app.stats["gga_parse_us"], app.stats["gga_parse_us_max"]), (10, 42))
+
+    def test_parse_cost_statistics_start_at_zero(self):
+        from state import AppState
+        stats = AppState().stats
+        for key in ("gga_parse_us", "gga_parse_us_max", "gga_parse_us_avg",
+                    "gga_parse_over_budget"):
+            self.assertEqual(stats[key], 0, key)
+
+    def test_parse_cost_average_and_budget_counter(self):
+        from state import app
+        fresh = {"gga_parse_us": 0, "gga_parse_us_max": 0, "gga_parse_us_avg": 0,
+                 "gga_parse_over_budget": 0}
+        # Every parse reads the clock twice: elapsed 42, 10, 3000, 2000 and 2001 us.
+        ticks = [1000, 1042, 2000, 2010, 3000, 6000, 7000, 9000, 10000, 12001]
+        expected = [(42, 0), (40, 0), (225, 1),
+                    # 2000 us is within the budget, 2001 us is the first one over it.
+                    (335, 1), (439, 2)]
+        with mock.patch.dict(app.stats, fresh), \
+                mock.patch.object(gnss, "_ticks_us", side_effect=ticks):
+            for average, over_budget in expected:
+                self.parse(GGA_RTK)
+                self.assertEqual(
+                    (app.stats["gga_parse_us_avg"], app.stats["gga_parse_over_budget"]),
+                    (average, over_budget))
+            self.assertEqual(app.stats["gga_parse_us_max"], 3000)
+            self.assertEqual(app.stats["gga_parse_us"], 2001)
+
 
 class TestParseGst(unittest.TestCase):
     def test_complete_receiver_error_estimate(self):
@@ -180,11 +402,15 @@ if __name__ == "__main__":
 
 
 class TestKeinNullIsland(unittest.TestCase):
-    """Without a fix, no position must be indicated. nmea_to_deg delivered 0.0 for an empty coordinate field - i.e. exactly in the case of 'no fix'. status.py checks on 'is not None', which was always true, and showed 0.0000000/0.0000000 as a real position.
+    """Without a fix, no position must be indicated. An empty coordinate field once came out as 0.0 - i.e. exactly in the case of 'no fix' - and status.py, which checks on 'is not None', showed 0.0000000/0.0000000 as a real position. An empty or unreadable coordinate field must never appear as 0.0/0.0.
     """
 
     def test_empty_field_is_not_a_coordinate(self):
-        self.assertIsNone(gnss.GNSSHandler.nmea_to_deg("", "N"))
+        fix = gnss.GNSSHandler.parse_gga(
+            _Dummy(), sentence("GNGGA,174608.000,,N,00039.259260,W,4,31,0.57,123.456,M,12.3,M,2.0,0054"))
+        self.assertIsNone(fix["lat"])
+        self.assertIsNone(fix["lat_e8"])
+        self.assertEqual(fix["lon_e8"], -65432100)
 
     def test_gga_without_a_fix_has_no_position(self):
         fix = gnss.GNSSHandler.parse_gga(_Dummy(), GGA_NOFIX)
@@ -205,9 +431,18 @@ class TestKeinNullIsland(unittest.TestCase):
         fix = gnss.GNSSHandler.parse_gga(_Dummy(), sentence)
         self.assertIsNone(fix["lat"])
         self.assertIsNone(fix["lon"])
+        self.assertIsNone(fix["lat_e8"])
+        self.assertIsNone(fix["lon_e8"])
+        # The heights are not position data: they stay populated, like the float alt.
+        self.assertEqual(fix["alt_mm"], 123456)
+        self.assertEqual(fix["geoid_sep_mm"], 12300)
 
     def test_garbage_is_left_without_position(self):
-        self.assertIsNone(gnss.GNSSHandler.nmea_to_deg("abc", "N"))
+        fix = gnss.GNSSHandler.parse_gga(
+            _Dummy(), sentence("GNGGA,174608.000,abc,N,00039.259260,W,4,31,0.57,123.456,M,12.3,M,2.0,0054"))
+        self.assertIsNone(fix["lat"])
+        self.assertIsNone(fix["lat_e8"])
+        self.assertEqual(fix["lon_e8"], -65432100)
 
 
 class TestRawSentenceForGga(unittest.TestCase):

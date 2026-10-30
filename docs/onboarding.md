@@ -27,39 +27,61 @@ device code in clear text, next to the stored Wi-Fi and NTRIP credentials
 2. Join the setup access point. It is named after the device, for example
    `RTK-A1B2C3-SETUP`, and is protected with WPA/WPA2-PSK and a random
    device-specific password (`net.py`, `cfg_factory.py`).
-3. Open `http://192.168.4.1/` and sign in with the device code from the label.
-4. Under **Device -> Configuration**, enter the primary Wi-Fi network, any
+3. Most phones open the sign-in page by themselves (captive portal) and show
+   **Device -> Connections -> Internet & corrections** after signing in.
+   Otherwise open `http://192.168.4.1/#device/configuration` (an old link that
+   the portal forwards to that page) and sign in with the device code from the
+   label.
+4. Under **Device -> Connections -> Internet & corrections**, enter the primary Wi-Fi network, any
    fallback networks (one `SSID` or `SSID:password` per line), and the NTRIP
    caster host, port, mountpoint, and credentials. A caster host looks like
    `caster.example.net`.
-5. Save. The portal validates the values, stages them, and then asks the
-   device to restart so the staged configuration can prove itself
-   (`PUT /api/config` followed by `POST /api/config/apply`). Wait for the
-   restart to finish.
-6. Reopen the portal over the joined network, at `http://rtk-a1b2c3.local/`
-   or at the current IP address if `.local` is not resolved.
-7. Open **Status** and confirm that the receiver reports a fix, that the
-   correction stream is live, and that the solution reaches **RTK FIXED**
-   under a clear sky.
+5. Choose **Check changes**. The portal lists what you changed, what takes
+   effect at once (caster settings), what restarts the device (Wi-Fi), and what
+   already waits in the device memory from an earlier save. Nothing is sent
+   before you confirm.
+6. Choose **Save and restart**. A progress panel shows the steps HTTP, Wi-Fi,
+   NTRIP and survey storage. The Wi-Fi settings are held back until the
+   restart, and the device keeps them only if it joins the network; otherwise
+   it restores the previous ones. After the restart, sign in again with the
+   device code (sessions do not survive a restart); the panel continues and ends
+   with the result: the connected network and the portal address, or the cause of
+   a failure. If there is no answer after 90 s, put the phone into the network
+   the panel names and open `http://rtk-a1b2c3.local/` (or the current IP address
+   if `.local` is not resolved).
+7. Open **Check field setup** and then **Measure**, and confirm that the receiver
+   reports a fix, that the correction stream is live, and that the solution
+   reaches **RTK FIXED** under a clear sky.
 
 ## Acceptance before field work
 
 - The label and both QR codes work.
 - Sign-in, sign-out, and sign-in again work.
-- German and English, and the high-contrast outdoor display, are usable
-  (**Device -> Settings**).
+- German and English, and the appearance (Automatic, Light, Dark and High
+  contrast), are usable (**Device -> Operation & display**).
 - BLE pairs with the six-digit passkey, the link is encrypted and bonded, and
   NMEA arrives.
 - TCP port 10110 asks for the `AUTH <stream token>` handshake by default and
   delivers NMEA afterwards.
-- Switching TCP authentication off for a test (**Device -> Access**) makes a
-  new connection start with NMEA immediately; switch it back on afterwards.
+- Switching TCP authentication off for a test (**Device -> Connections ->
+  Device access**) makes a new connection start with NMEA immediately; switch
+  it back on afterwards.
 - A test project with one line and one asset point can be created, displayed,
   exported, and deleted again.
-- **Device -> Diagnostics** and **Device -> Log** show no unexplained errors,
-  and the free RAM on **Device -> Diagnostics** and the filesystem figures on
+- **Device -> Diagnostics** and **Device -> Diagnostics -> Log** show no
+  unexplained errors, and the free RAM on **Device -> Diagnostics** and the filesystem figures on
   the **Device** overview are plausible.
+- **Measure -> Field setup** holds the measurement method, the measurement
+  rules, the antenna height, the reference frame and its epoch; a change shows
+  in a second browser, too. With an RTK fix and no reference frame, **Measure**
+  reminds you before you record. If the correction service announces its frame
+  (RTCM 1300), the field setup offers it as a suggestion: confirm it with
+  **Use reported frame** or dismiss it; nothing changes until you confirm.
 - A restart keeps the configuration and the projects.
+- A test point shows a running state and its result in the action bar of the
+  measure screen, and **Undo** removes it within 6 seconds.
+- With NTRIP switched off, the measure screen and the header say so and offer
+  the NTRIP settings.
 
 Bluetooth Classic and SPP are not part of the acceptance: the ESP32-S3
 supports Bluetooth LE only.

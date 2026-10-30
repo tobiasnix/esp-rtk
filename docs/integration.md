@@ -72,9 +72,13 @@ AUTH <stream_token>\r\n
 
 Rules enforced by the server:
 
-- each byte of the line must arrive within five seconds of the previous one
-  (there is no total deadline for the handshake), and the line must not
-  exceed 96 bytes,
+- each byte of the line must arrive within five seconds of the previous one,
+  the whole handshake (including the server's own writes) must finish within
+  ten seconds of the connection being accepted, and the line must not exceed
+  96 bytes,
+- connections that are still authenticating and connected clients share
+  `nmea_tcp_max_clients`; a connection beyond it is closed at once without a
+  greeting,
 - the token is compared without early termination on a wrong character,
 - success is confirmed with `OK AUTH\r\n`, and only then does NMEA begin,
 - on failure the server sends `ERR AUTH\r\n` where it still can and closes the
@@ -85,14 +89,17 @@ passkey. It is a separate 128-bit secret and is served only to an
 authenticated session, through `GET /api/label`.
 
 Administrators change the mode with `GET`/`PUT /api/tcp-auth` or under
-**Device -> Access**. With authentication switched off, a new connection
-receives **no greeting and no protocol bytes at all**: the first byte belongs
+**Device -> Connections** (device access). With authentication switched off, a
+new connection receives **no greeting and no protocol bytes at all**: the first byte belongs
 to the raw NMEA stream. Existing connections are not renegotiated. Clients
 must read `authentication_required` from `/api/access` instead of inferring
 the mode from a timeout.
 
-`POST /api/stream-token/rotate` issues a new token and disconnects the
-currently connected TCP clients. BLE bonds are unchanged.
+`POST /api/stream-token/rotate` issues a new token, closes the sockets of
+the currently connected TCP clients and ends their connections; a handshake
+that started before the rotation is not admitted. The response waits until all
+clients are closed (at worst `nmea_tcp_max_clients` x 5 s with hanging clients;
+on MicroPython the close is practically instant). BLE bonds are unchanged.
 
 ### Bluetooth LE
 
@@ -137,10 +144,20 @@ Rules:
 
 - `device_id`: twelve uppercase hex characters, no separators;
 - `ntrip_state`: `disabled`, `waiting_wifi`, `connecting`, `streaming`,
-  `backoff`, `auth_error`, or `mount_error` - no other value is publishable;
-- `rtcm_stream_age_s`: age of the last RTCM frame received by the device,
-  rounded to 0.1 s. It is not GGA field 13, and it stays empty until the first
-  frame of this boot has arrived;
+  `backoff`, `auth_error`, or `mount_error` - no other value is publishable.
+  A stream whose corrections are stale stays `streaming` here; the stale
+  substate is not part of the sentence;
+  Internal values are mapped before publication. A client parked after
+  `ntrip_max_retries` reports `backoff` here, or `auth_error`/`mount_error`
+  when its last attempt ended with that permanent error; the reason,
+  `retries_exhausted`, is only in `last_ntrip_error_code` (`/status`). The client
+  stays parked until a restart, a caster change, or a Wi-Fi loss. `caster_error` and
+  `protocol_error` are error codes, not states;
+- `rtcm_stream_age_s`: the arrival age, the age of the last RTCM frame
+  received by the device, rounded to 0.1 s. It is not GGA field 13 and not the
+  MSM epoch age (both are defined in the *Correction ages* section of
+  [technical.md](technical.md#correction-ages)), and it stays empty until the
+  first frame of this boot has arrived;
 - `rtcm_bytes`: monotonically increasing since start-up;
 - `msm`: the received MSM families, sorted and joined with `+`, for
   example `4+7`;
@@ -157,8 +174,117 @@ Rules:
 
 `telemetry_interval_sec = 0` disables the sentence.
 
+`$PESPS` version 1 is unchanged by the exact-position work: it carries the
+arrival age and no position, no epoch age, and no fix freshness. A client that
+needs those reads `GET /api/ui/live`, described in [technical.md](technical.md).
+
 In GGA-derived data, the correction age and the station ID stay nullable, and
 a station ID keeps its leading zeros because it is carried as a string.
+
+## Survey coordinates and heights
+
+Positions are exact integers. Read the integer fields; the float fields are
+display values.
+
+| Where | Fields |
+|---|---|
+| The live fix: `current_fix` in `GET /api/ui/live`, `fix` in `GET /status` | `lat_e8` and `lon_e8` in units of 1e-8 degree, `alt_mm` and `geoid_sep_mm` in millimetres. `lat_e8`, `lon_e8`, `lat`, and `lon` are `null` at fix quality 0 or when the receiver's text is not a valid NMEA coordinate (no hemisphere, minutes of 60 or more, a sign, a space, an exponent), and `alt_mm` and `geoid_sep_mm` (with `alt`, `altitude_msl_m`, and `geoid_sep_m`) are `null` when the field is empty or not a plain decimal number. Every float is derived from its integer and is `null` exactly when the integer is. Before the first GGA has been parsed the position and other GGA-derived keys are absent altogether (the object then holds `qual`, `fix_status_text`, `sats`, the freshness fields, and `pending_gst`, plus `held_receiver_accuracy` while that is pending), so check `qual` first and then read the keys. `lat`, `lon`, and `alt` are floats for display only; on the device they are 32-bit and resolve a latitude only to about 0.4 m |
+| Stored points: the NDJSON backup, `GET /api/tracking/line`, `GET /api/tracking/map` | the triple `[lon_e8, lat_e8, alt_mm]`, longitude first, as JSON integers |
+| GeoJSON and CSV exports | the same values as exact decimal text: eight fraction digits for longitude and latitude, three for the height |
+
+A client that needs degrees divides by 100 000 000. The integers are the
+receiver's NMEA text converted with integer arithmetic and rounded half up once
+at 1e-8 degree (an averaged measurement stores the integer mean); the firmware
+does not transform or re-project them.
+
+Every measurement states its `precision`. `e8` marks a point measured by a
+firmware that stores schema 5. `legacy_float32` marks a point converted from
+schema 4 or older, whose integers are no better than the 32-bit floats they
+came from (about 0.4 m in latitude). Treat a `legacy_float32` coordinate as
+approximate. It also lacks the geoid separation, ellipsoid height, antenna
+height, reference frame, epoch, and mountpoint that newer points carry. In the
+stored data and in an NDJSON backup those keys are absent or `null`. The
+exports normalise them: GeoJSON shows `null` for the missing height values and
+for the epoch and `unknown` for the frame, and the CSV leaves the cells empty
+and prints `unknown` for the frame. The MSL height (`altitude_msl_m`) of a
+legacy point is kept, as approximate as its position.
+
+In GeoJSON the third value of `[lon, lat, alt]` is the MSL height of the
+antenna phase centre. That keeps existing consumers working, but RFC 7946
+expects an ellipsoidal height there. Read the ellipsoidal height from
+`altitude_ellipsoid_m`, the ground height from `ground_height_msl_m`, and the
+reference of the height value from `height_reference`
+(`antenna_phase_centre_msl`). The file-level `crs_note` says that no coordinate
+is transformed.
+
+The GeoJSON is nominally WGS84, as RFC 7946 prescribes, but each coordinate
+carries the values of the frame named by its `reference_frame` (`tracking/frames.py`
+`CRS_NOTE`).
+
+`reference_frame` (and `reference_frame_epoch`) states the frame of the
+horizontal position: for RTK solutions (fix quality 4 or 5) the label the
+operator configured for the correction service, `WGS84/ITRF` for any other
+fix, and `unknown` where no label was configured. It is a label, not a
+verified fact. A line export reports `mixed` when its vertices differ.
+
+`reference_frame_source` says how the label is known: `recorded` (stored with the
+measurement), `assigned` (the user gave the project's RTK points without a frame
+a frame afterwards; this is a statement by the user, not a recording, and
+nothing was transformed) or `null` where the frame is `unknown`. Every exported
+measurement carries it, the point CSV has it as a column after
+`reference_frame_epoch`, and a GeoJSON export names the project's assignment in
+`frame_assignment`.
+
+The live fix also carries `fix_age_ms`, `fix_seq`, `fix_rev`, `stale`, and
+`pending_gst`, which tell a client whether the position is current. They are
+defined in [technical.md](technical.md#live-fix-and-freshness-fields); a client
+must not treat a fix with `stale: true` as a current position.
+
+`rtcm.arrival_age_sec`, `rtcm.epoch_age_sec`, and the GGA correction age
+(`correction_age_sec`) are three different ages. They are defined once, in
+[technical.md](technical.md#correction-ages).
+
+## Timestamps
+
+`recorded_at` is the number of seconds since 2000-01-01T00:00:00Z. The device
+and every backup use this one base, regardless of the platform that wrote
+the file. To get Unix time, add the offset:
+
+    unix_seconds = recorded_at + 946684800
+
+The device clock is set by NTP or the receiver's RMC time and is re-stepped
+to RMC time when it deviates by more than 1 s (checked on every RMC sentence).
+A difference of one whole second is sub-second phase, not drift, and is left
+alone. An NTP sync of an already valid clock (each Wi-Fi reconnect) that moves it by more than 1 s also counts
+as a step. A step moves later timestamps by the deviation, so
+`recorded_at` of consecutive points can jump forwards or backwards by a few
+seconds at a step; each step is logged and appears in the field diagnostics as
+a `clock_resync` event (reason `drift` or `ntp`). Durations and intervals on the device use a monotonic
+tick counter and are not affected.
+
+Example: `recorded_at` `86400` is `2000-01-02T00:00:00Z`.
+
+A valid timestamp is a non-negative integer below 2**40. A restore refuses a
+backup whose `recorded_at` is anything else, including a float such as
+`86400.0`.
+
+Exports and detail views also carry two derived fields. They are computed on
+output, never stored, and ignored on restore:
+
+- `recorded_at_utc` is the ISO 8601 UTC text of `recorded_at`
+  (`YYYY-MM-DDTHH:MM:SSZ`), or `null` when `recorded_at` is not a valid
+  timestamp. Consumers should prefer it: spreadsheets and GIS tools read the
+  text without conversion.
+- `clock_unsynced` is `true` when the point was recorded before the clock was
+  set by NTP or RMC time (its timestamp then lies in the year 2000) or when
+  the timestamp is invalid. It is also `true` for any date outside 2024-2099.
+  Such timestamps must not be treated as real dates.
+
+They appear in the GeoJSON `properties.measurement` of points and in the
+`measurements[]` entries of lines, in the NDJSON backup, and in the map and
+line detail data. In the CSV export they are the columns `recorded_at`,
+`recorded_at_utc` and `clock_unsynced`, placed before `note`; there
+`clock_unsynced` is written as `true` or `false`.
 
 ## Related documents
 

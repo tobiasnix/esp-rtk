@@ -46,11 +46,12 @@ Sessions live in RAM only and do not survive a restart. Session ages are
 measured with a monotonic tick counter, so an NTP step cannot expire a session
 retroactively. The session cookie and the CSRF token never appear in a URL.
 The one credential that does is the device code, which the portal QR code
-encodes as `http://<hostname>.local/setup#code=<device code>` (`web.py`); the
+encodes as `http://<hostname>.local/#code=<device code>` (`web.py`); the
 web app reads it from the URL **fragment**, not a query string, so browsers
-neither send it to the server nor place it in a `Referer` header. This is why
-the label and its QR codes must not be published (see
-[onboarding.md](onboarding.md)).
+neither send it to the server nor place it in a `Referer` header. Labels
+printed by earlier firmware encode `/setup#code=...`; that address keeps
+working until the fallback page is removed. This is why the label and its QR
+codes must not be published (see [onboarding.md](onboarding.md)).
 
 State-changing requests additionally need the CSRF token from
 `GET /api/session` in the `X-CSRF-Token` header - the one HTML form endpoint,
@@ -67,11 +68,11 @@ Honest limits:
 
 - The rate limit is per client address. It slows a single guessing client; it
   does not stop an attacker who can vary the source address.
-- `status_token` and `config_token` are obsolete. They are still read from an
-  old `config.json` and persist across a firmware update - only a factory
-  reset clears them - and **no endpoint authorizes on a `?token=` parameter
-  today** - the `401` text on `/rtcm` that still mentions one is stale (see
-  [known-limitations.md](known-limitations.md)).
+- `config_token` is obsolete. It is still read from an old `config.json` and
+  persists across a firmware update - only a factory reset clears it - and
+  **no endpoint authorizes on a `?token=` parameter today**. `status_token`
+  was removed; an old value is ignored on load. An unauthenticated `/rtcm`
+  request is answered `401` with `Administrator sign-in required.`
 
 ## The setup access point
 
@@ -123,27 +124,29 @@ is neither the device code nor the BLE passkey, and it is served only to an
 authenticated session through `GET /api/label`. The handshake itself and its
 byte limit are specified in [integration.md](integration.md).
 
-An administrator can switch the requirement off under **Device -> Access**,
-for clients that cannot perform the handshake. Every participant on the local
+An administrator can switch the requirement off under **Device -> Connections**
+(device access), for clients that cannot perform the handshake. Every participant on the local
 network with access to port 10110 or 2947 can then read the position stream.
 That mode is meant for a trusted, isolated network only, and it applies to new
 connections; existing connections are not renegotiated.
 
-`POST /api/stream-token/rotate` issues a new token and disconnects the
-currently connected TCP clients. BLE bonds are unaffected.
+`POST /api/stream-token/rotate` issues a new token, closes the sockets of
+the currently connected TCP clients and ends their connections; a handshake
+that started before the rotation is not admitted. The response waits until all
+clients are closed (at worst `nmea_tcp_max_clients` x 5 s with hanging clients;
+on MicroPython the close is practically instant). BLE bonds are unaffected.
 
 Honest limit: the handshake authenticates the client once, in clear text, on a
 plain TCP connection. It keeps casual readers off the stream on a shared
 network; it is not confidentiality, and an observer of the connection learns
 the token.
 
-Honest limit: the five-second timeout applies to each byte, not to the
-handshake as a whole, so there is no total deadline for a slow client to
-finish it. While a connection is unauthenticated it still counts against
-`nmea_tcp_max_clients`, so clients that send bytes just often enough to avoid
-the per-byte timeout can occupy every pending-authentication slot and block
-new connections from authenticating (see
-[known-limitations.md](known-limitations.md)).
+Honest limit: the handshake has a total deadline of ten seconds from the
+accepted connection (including the server's own writes), and connections that
+are still authenticating share `nmea_tcp_max_clients` with connected clients.
+Up to `nmea_tcp_max_clients` unauthenticated connections can therefore still
+occupy every slot for up to ten seconds each and block new connections during
+that time.
 
 ## Bluetooth LE
 

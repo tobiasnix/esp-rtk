@@ -4,6 +4,7 @@ import asyncio
 import unittest
 from unittest import mock
 
+import cfg_logging
 from support import web
 
 
@@ -68,6 +69,8 @@ class TestHttpFlashDelays(unittest.IsolatedAsyncioTestCase):
                 admitted = web._http_connections
                 with mock.patch.object(web, "_read_request", mock.AsyncMock(
                         return_value=(None, None, reason))), \
+                        mock.patch.object(web, "_REQUEST_REJECT_LOG", cfg_logging.LogThrottle(
+                            cfg_logging.HOT_PATH_LOG_INTERVAL_MS)), \
                         mock.patch.object(web, "log") as logged:
                     await web.handle_http_client(object(), writer)
                 logged.assert_called_once_with("WARN", "HTTP",

@@ -62,12 +62,12 @@ class TestParallelTrackingTool(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(shared))
 
     def export_fixture(self):
-        rows = [{"record": "header", "kind": "survey_backup", "schema_version": 4},
+        rows = [{"record": "header", "kind": "survey_backup", "schema_version": 5},
                 {"record": "project", "project": {"id": "project-1", "name": "Test"}},
                 {"record": "line", "project_id": "project-1",
                  "line": {"id": "line-1", "state": "recording", "name": "Test line"}},
                 {"record": "vertex", "project_id": "project-1", "line_id": "line-1",
-                 "coordinate": [10.0, 40.0, 100.0], "measurement": {"recorded_at": 1,
+                 "coordinate": [1000000000, 4000000000, 100000], "measurement": {"recorded_at": 1,
                     "fix_status": "RTK_FIXED", "satellites": 24, "hdop": 0.6,
                     "quality": {"accepted": True}}},
                 {"record": "footer", "active_project_id": "project-1",
@@ -79,7 +79,7 @@ class TestParallelTrackingTool(unittest.TestCase):
     def test_export_requires_matching_integrity_and_point_count(self):
         raw = self.export_fixture()
         self.assertEqual(tool.verify_export(raw, 1)["points"], 1)
-        for broken, target in [(raw, 2), (raw.replace(b"10.0", b"11.0"), 1),
+        for broken, target in [(raw, 2), (raw.replace(b"1000000000", b"1100000000"), 1),
                                (raw.splitlines(keepends=True)[0], 1),
                                (raw + b'{}\n', 1)]:
             with self.assertRaises(ValueError):

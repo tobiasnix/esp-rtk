@@ -3,6 +3,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from support import cfg, state, web
 
@@ -77,6 +78,13 @@ class TestDiagnostics(unittest.TestCase):
         for secret in ("password12", "castersecret", "DEVICESECRET", "STREAMSECRET"):
             self.assertNotIn(secret, rendered)
 
+    def test_snapshot_serves_an_unreadable_result_as_pending(self):         # #23a M-2
+        unknown = {"schema_version": 2, "status": "unknown", "details": {}}
+        with mock.patch.object(web, "config_result_read", return_value=unknown):
+            applied = web.diagnostics_snapshot()["config_apply"]
+        self.assertEqual((applied["status"], applied["details"]),
+                         ("pending", {"code": "result_unreadable"}))
+
     def test_config_result_survives_reloading(self):
         cwd = os.getcwd(); tmp = tempfile.mkdtemp(prefix="esp-result-"); os.chdir(tmp)
         try:
@@ -84,6 +92,18 @@ class TestDiagnostics(unittest.TestCase):
             self.assertEqual(cfg.config_result_read()["status"], "failed")
         finally:
             os.chdir(cwd)
+
+    def test_config_result_uptime_is_device_uptime_not_wall_clock(self):
+        cwd = os.getcwd(); tmp = tempfile.mkdtemp(prefix="esp-result-"); os.chdir(tmp)
+        try:
+            with mock.patch.object(state.app, "uptime_seconds", return_value=42), \
+                    mock.patch("time.time", return_value=1_800_000_000):
+                self.assertTrue(cfg.config_result_write("pending"))
+            result = cfg.config_result_read()
+        finally:
+            os.chdir(cwd)
+        self.assertEqual(result["uptime_sec"], 42)
+        self.assertEqual(result["schema_version"], 2)
 
 
 if __name__ == "__main__": unittest.main()

@@ -21,7 +21,9 @@ async function settle(page, hash, selector) {
   page.on("pageerror", error => errors.push(error.message));
   page.on("requestfailed", request => {
     const failure = request.failure().errorText;
-    if (failure === "net::ERR_ABORTED" && ["/api/ui/live", "/status"].some(path => request.url().includes(path))) return;
+    // The last-change notice of the configuration page (#23c) reads /api/config-result with the route signal.
+    // The app closes its event stream (#27) when the tab is hidden, the device restarts or the page changes.
+    if (failure === "net::ERR_ABORTED" && ["/api/ui/live", "/status", "/api/config-result", "/api/events"].some(path => request.url().includes(path))) return;
     failures.push(`${request.method()} ${request.url()} ${failure}`);
   });
   await page.goto(base + "/", { waitUntil: "domcontentloaded" });
@@ -31,7 +33,7 @@ async function settle(page, hash, selector) {
   }
   await page.waitForSelector(".readiness-hero", { timeout: 15000 });
   assert.strictEqual(await page.locator("#view-back").count(), 0);
-  assert.strictEqual(await page.locator('#mobile-nav [data-route="status"]').getAttribute("aria-current"), "page");
+  assert.strictEqual(await page.locator('#mobile-nav [data-route="measure"]').getAttribute("aria-current"), "page");
   const contract = await page.evaluate(async () => {
     const [status, tracking, live] = await Promise.all([
       fetch("/status").then(response => response.json()),
@@ -71,10 +73,11 @@ async function settle(page, hash, selector) {
   assert.strictEqual(tcpAuthRoundTrip.accessDisabled.authentication, null);
   assert.strictEqual(tcpAuthRoundTrip.restored.required, true);
   const routes = [
-    ["status", ".readiness-hero"], ["projects", ".project-list"], ["device", ".device-links"],
-    ["device/rtcm", ".stream-hero"], ["device/access", ".access-grid"], ["device/log", ".log-console"],
-    ["device/module", ".command-panel"], ["device/configuration", ".configuration-layout"],
-    ["device/diagnostics", ".diagnostics-summary"], ["device/label", ".label-grid"], ["device/settings", ".settings-layout"],
+    ["measure", ".readiness-hero"], ["measure/setup", ".field-setup-layout"], ["projects", ".project-list"], ["archive", ".text-link[href=\"/#projects\"]"],
+    ["device", ".device-links"], ["device/diagnostics/rtcm", ".stream-hero"], ["device/connections/access", ".access-grid"],
+    ["device/diagnostics/log", ".log-console"], ["device/diagnostics/console", ".command-panel"],
+    ["device/connections/internet", ".configuration-layout"], ["device/diagnostics", ".diagnostics-summary"],
+    ["device/connections/access", ".label-grid"], ["device/display", ".settings-layout"], ["device/maintenance", ".maintenance-layout"],
   ];
   assert.strictEqual(await page.locator('script[src*="/qr.js?"]').count(), 0);
   for (const width of [320, 360, 480, 1024, 1440]) {
@@ -86,22 +89,23 @@ async function settle(page, hash, selector) {
     }
   }
   await page.setViewportSize({ width: 360, height: 900 });
-  await settle(page, "status", ".readiness-hero");
+  await settle(page, "measure", ".readiness-hero");
   assert((await page.locator(".readiness-hero").boundingBox()).height < 260);
   assert.strictEqual(await page.locator(".readiness-hero .metric").count(), 4);
   const compact = await page.evaluate(() => ({ header: document.querySelector(".app-header").getBoundingClientRect().height, footer: document.querySelector(".mobile-nav").getBoundingClientRect().height, status: document.querySelector("#live-state").getBoundingClientRect().height }));
   assert(compact.header <= 65 && compact.footer <= 61 && compact.status >= 48);
   assert.strictEqual(await page.locator(`script[src*="/qr.js?v=${expectedVersion}"]`).count(), 1);
   await settle(page, "device", ".device-links");
-  assert.strictEqual(await page.locator(".device-links a").count(), 7);
+  assert.strictEqual(await page.locator(".device-links a").count(), 4);
   assert((await page.locator(".device-identity").innerText()).includes("V" + expectedVersion));
-  await settle(page, "device/configuration", ".configuration-layout");
+  await settle(page, "device/connections/internet", ".configuration-layout");
   assert(await page.locator('textarea[name="wifi_networks"]').inputValue() !== "");
   await page.getByRole("button", { name: "Scan networks" }).click();
   await page.waitForSelector("dialog[open]", { timeout: 20000 });
   await page.getByRole("button", { name: "Cancel" }).click();
-  await settle(page, "device/settings", ".settings-layout");
+  await settle(page, "device/display", ".settings-layout");
   assert.strictEqual(await page.getByRole("button", { name: "English" }).getAttribute("aria-pressed"), "true");
+  await settle(page, "measure/setup", ".field-setup-layout");
   assert.strictEqual(await page.locator(".measurement-choice button").count(), 4);
   assert(await page.getByRole("button", { name: "Until quality is OK" }).isVisible());
   const gateRoundTrip = await page.evaluate(async () => {
@@ -115,23 +119,26 @@ async function settle(page, hash, selector) {
   });
   assert.strictEqual(gateRoundTrip.saved.max_hdop, gateRoundTrip.original.max_hdop + .1);
   assert.deepStrictEqual(gateRoundTrip.reset, gateRoundTrip.defaults);
-  const contrast = page.getByRole("button", { name: "High contrast off" });
+  await settle(page, "device/display", ".settings-layout");
+  const contrast = page.locator('.theme-choice [data-theme-choice="high-contrast"]');
   assert.strictEqual(await contrast.getAttribute("aria-pressed"), "false");
   await contrast.click();
-  assert.strictEqual(await page.getByRole("button", { name: "High contrast on" }).getAttribute("aria-pressed"), "true");
+  assert.strictEqual(await contrast.getAttribute("aria-pressed"), "true");
   await page.getByRole("button", { name: "Deutsch" }).click();
   assert.strictEqual(await page.getByRole("button", { name: "Deutsch" }).getAttribute("aria-pressed"), "true");
   await settle(page, "projects", ".project-list");
   const projectText = await page.locator(".project-list").innerText();
   assert(!projectText.includes("1970") && !projectText.includes("1996"));
-  await settle(page, "device/rtcm", ".stream-hero");
+  await settle(page, "device/diagnostics/rtcm", ".stream-hero");
   assert(["Strom steht", "Strom unterbrochen"].includes(await page.locator(".stream-hero h2").innerText()));
   await settle(page, "device/diagnostics", ".diagnostics-summary");
   assert.strictEqual(await page.locator(".diagnostics-console").count(), 0);
   if (contract.inactiveProject) {
     await settle(page, `projects/${contract.inactiveProject}`, ".map-workspace");
     assert(await page.locator(".map-panel > .btn.primary").isVisible());
-    assert.strictEqual(await page.locator(".map-tools .btn").count(), 5);
+    // Zoom, fit and centre stay in the tool row; the layer switches live in its menu: four tool buttons plus three layer buttons.
+    assert.strictEqual(await page.locator(".map-tools > .btn").count(), 4);
+    assert.strictEqual(await page.locator(".map-menu .map-layers .btn").count(), 3);
     const stillActive = await page.evaluate(() => fetch("/api/tracking").then(response => response.json()).then(value => value.active_project_id));
     assert.strictEqual(stillActive, contract.project);
   }

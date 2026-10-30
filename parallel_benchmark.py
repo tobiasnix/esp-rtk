@@ -7,7 +7,7 @@ import ujson
 import uasyncio as asyncio
 
 from state import app, shutdown_event, _instances
-from tracking import Tracker
+from tracking import StorageReserveError, Tracker
 
 CONFIG_PATH = "parallel-benchmark.json"
 PREFIX = "parallel-benchmark-v15"
@@ -84,10 +84,10 @@ def control(action, production_tracker, target=None, confirm=None, profile="para
             raise ValueError("Unsupported benchmark target.")
         if not isinstance(profile, str) or profile not in PROFILES:
             raise ValueError("Unsupported benchmark profile.")
-        if production_tracker.active_line_id or production_tracker._pending_fixes:
+        if production_tracker.has_open_recording():
             raise ValueError("Finish the active production line before benchmarking.")
         if not production_tracker.storage_capacity(16384, force=True)["writable"]:
-            raise ValueError("Insufficient flash reserve for the benchmark.")
+            raise StorageReserveError("Insufficient flash reserve for the benchmark.")
         # A new WLAN run must cover the entire requested population under load.
         if any(name.startswith(PREFIX + ".") for name in os.listdir()):
             raise ValueError("Export and clean up the previous synthetic run first.")
@@ -162,7 +162,7 @@ def prepare(production_tracker):
             and config.get("control") != "wifi"):
         app.stats["parallel_benchmark_state"] = "refused_real_inventory"
         return None, None
-    if production_tracker.active_line_id or production_tracker._pending_fixes:
+    if production_tracker.has_open_recording():
         app.stats["parallel_benchmark_state"] = "refused_active_recording"
         return None, None
     tracker = Tracker(PREFIX, max_features=config["target_points"])
@@ -183,7 +183,7 @@ def prepare(production_tracker):
         "parallel_benchmark_target": config["target_points"],
         "parallel_benchmark_points": tracker.feature_count(),
         "parallel_benchmark_generated": 0,
-        "parallel_benchmark_queue_max": len(tracker._pending_fixes),
+        "parallel_benchmark_queue_max": tracker.pending_count(),
         "parallel_benchmark_heap_min": gc.mem_free(),
         "parallel_benchmark_run_id": config.get("run_id"),
         "parallel_benchmark_profile": config["profile"],
@@ -204,6 +204,8 @@ def prepare(production_tracker):
 
 def _synthetic_fix(index):
     return {"lat": 40.0, "lon": 10.0 + index * 0.00001, "alt": 100.0,
+            "lat_e8": 4000000000, "lon_e8": 1000000000 + index * 1000,
+            "alt_mm": 100000,
             "utc": index, "qual": 4, "fix_status_text": "RTK_FIXED",
             "sats": 24, "hdop": 0.6, "correction_age_sec": 0.5,
             "station_id": "SYNTHETIC", "receiver_accuracy": {
@@ -311,7 +313,7 @@ def _write_result(tracker, state, started_ms):
     stat = os.statvfs("/")
     payload = {
         "kind": "parallel_tracking_benchmark_result", "schema": 1,
-        "state": state, "target_points": tracker._feature_limit(),
+        "state": state, "target_points": tracker.feature_limit(),
         "profile": tracker._parallel_profile,
         "required_services": list(tracker._parallel_required_services),
         "confirmed_points": tracker.feature_count(),
@@ -332,7 +334,7 @@ def _write_result(tracker, state, started_ms):
         "initial_points_this_boot": tracker._parallel_initial_points,
         "production_points": tracker._parallel_production_points,
         "qualification_valid": (state == "complete" and
-                                tracker.feature_count() == tracker._feature_limit() and
+                                tracker.feature_count() == tracker.feature_limit() and
                                 tracker._parallel_initial_points == 0),
     }
     temporary = RESULT_PATH + ".tmp"
@@ -388,28 +390,28 @@ async def producer(tracker, config):
             # A failed qualification cannot recover by adding more points.
             # Stop generating, persist diagnostics, and keep exports available.
             break
-        queued_total = tracker.feature_count() + len(tracker._pending_fixes)
+        queued_total = tracker.feature_count() + tracker.pending_count()
         if queued_total < target:
             queued = tracker.enqueue_fix(_synthetic_fix(next_index))
             app.stats["parallel_benchmark_generated"] += 1
             if queued is True:
                 next_index += 1
             elif queued is None:
-                app.stats["tracking_queue_overflows"] += 1
-        depth = len(tracker._pending_fixes)
+                app.note_tracking_queue_overflow()
+        depth = tracker.pending_count()
         app.stats["parallel_benchmark_queue_max"] = max(
             app.stats.get("parallel_benchmark_queue_max", 0), depth)
         app.stats["parallel_benchmark_points"] = tracker.feature_count()
         app.stats["parallel_benchmark_heap_min"] = min(
             app.stats.get("parallel_benchmark_heap_min", gc.mem_free()), gc.mem_free())
-        line = tracker._line(tracker._project())
+        line = tracker.active_line()
         if line and line.get("state") == "paused":
             failure = line.get("pause_reason") or "paused"
             break
         await asyncio.sleep_ms(config["interval_ms"])
     if shutdown_event.is_set():
         return
-    while tracker._pending_fixes:
+    while tracker.pending_count():
         if shutdown_event.is_set():
             return
         app.beat("parallel_benchmark")

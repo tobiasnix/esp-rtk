@@ -97,6 +97,12 @@ def authenticate(cookie_header, csrf=None, require_csrf=False, now=None):
     return dict(session)
 
 
+def session_active(cookie_header, now=None):
+    """True while the cookie names a live session; never extends its idle window."""
+    _prune(_now(now))
+    return parse_cookie(cookie_header).get("rtk_session") in _sessions
+
+
 def logout(cookie_header):
     token = parse_cookie(cookie_header).get("rtk_session")
     if token:

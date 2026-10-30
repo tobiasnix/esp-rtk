@@ -16,7 +16,7 @@ class TestBleBackpressure(unittest.IsolatedAsyncioTestCase):
         self.patches = [
             mock.patch.dict(state.app.stats, {"ble_drops": 0, "ble_tx_bytes": 0,
                 "ble_notify_retries": 0, "ble_notify_timeouts": 0,
-                "ble_notify_errors": 0}),
+                "ble_notify_errors": 0, "ble_notify_drops": 0}),
             mock.patch.object(ble.time, "ticks_ms", lambda: self.clock),
             mock.patch.object(ble.asyncio, "sleep_ms", self.sleep_ms),
         ]
@@ -65,6 +65,7 @@ class TestBleBackpressure(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.clock, ble._NOTIFY_TIMEOUT_MS)
         self.assertEqual(state.app.stats["ble_notify_timeouts"], 1)
         self.assertEqual(state.app.stats["ble_drops"], 1)
+        self.assertEqual(state.app.stats["ble_notify_drops"], 1)
 
     async def test_nontransient_and_negative_nimble_codes_are_not_retried(self):
         for error in (OSError(107), OSError(-12), ValueError("invalid")):
@@ -84,6 +85,7 @@ class TestBleBackpressure(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls.call_count, 1)
         self.assertEqual(state.app.stats["ble_tx_bytes"], 0)
         self.assertEqual(state.app.stats["ble_drops"], 1)
+        self.assertEqual(state.app.stats["ble_notify_drops"], 1)
 
     async def test_one_gnss_epoch_drains_despite_shared_scheduler_latency(self):
         self.manager.payload_sizes[7] = 20

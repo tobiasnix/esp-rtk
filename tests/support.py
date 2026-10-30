@@ -6,6 +6,7 @@ import sys
 import types
 import tempfile
 import time as _real_time
+from unittest import mock as _mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -279,6 +280,66 @@ def _roomy_statvfs(path):
 os.statvfs = _roomy_statvfs
 
 
+# --- os.ilistdir --------------------------------------------------------------
+# MicroPython's lazy directory listing: (name, type, inode) per entry; a
+# missing directory raises at the call, as on the device.
+if not hasattr(os, "ilistdir"):
+    def _ilistdir(path="."):
+        entries = os.scandir(path)
+
+        def items():
+            with entries:
+                for entry in entries:
+                    yield (entry.name, 0x4000 if entry.is_dir() else 0x8000, 0)
+        return items()
+
+    os.ilistdir = _ilistdir
+
+
+# --- guard of a package facade (#26c) ------------------------------------------
+# A plain patch of a facade global (mock.patch.object(tracking, "log"), an assignment
+# tracking.MAX_FEATURES = 1, ...) reaches none of the package modules that bind the name
+# themselves, so the test would pass without testing anything. The guarded facade refuses
+# it; only patch_module_global (below) may replace such a name.
+def _facade_check(module, name, value=None):
+    cls = type(module)
+    if name in cls.owned:
+        return
+    submodule = sys.modules.get(cls.package + "." + name)
+    if submodule is not None and (value is submodule or vars(module).get(name) is submodule):
+        return  # the import machinery binds a submodule to its package
+    # Frame 0 is this check, 1 the guard's __setattr__/__delattr__, 2 its caller: for a
+    # fan-out replacement that is mock._patch.__enter__/__exit__ with the patcher as self.
+    caller = sys._getframe(2).f_locals.get("self")
+    if getattr(caller, "_package_fanout", False):
+        return
+    raise AttributeError("%s.%s: patch it with support.patch_module_global('%s', '%s')"
+                         % (cls.package, name, cls.package, name))
+
+
+def guard_package_facade(package, owned):
+    """Let the facade `package` refuse every attribute change except its own names.
+
+    Allowed are the names in `owned` (bound by the facade itself, such as the tracker
+    singleton), submodule attributes set by the import machinery and the single patchers
+    of patch_module_global. Everything else raises AttributeError naming the helper.
+    The guard class carries `package` and `owned` (a frozenset). Host tests only.
+    """
+    def __setattr__(self, name, value):
+        _facade_check(self, name, value)
+        types.ModuleType.__setattr__(self, name, value)
+
+    def __delattr__(self, name):
+        _facade_check(self, name)
+        types.ModuleType.__delattr__(self, name)
+
+    module = sys.modules[package]
+    guarded = type("GuardedFacade", (types.ModuleType,),
+                   {"package": package, "owned": frozenset(owned),
+                    "__setattr__": __setattr__, "__delattr__": __delattr__})
+    types.ModuleType.__setattr__(module, "__class__", guarded)
+
+
 # --- main.py importieren ----------------------------------------------------
 # From an empty directory, so that load_config() does not read a real config.json of the
 # developer when imported and rotates the tests.
@@ -302,8 +363,77 @@ try:
     import ui
     import discovery
     import main
+    import tracking
+    guard_package_facade("tracking", owned=("tracker",))
 finally:
     os.chdir(_cwd)
+
+
+class _ModuleGlobalPatch:
+    """Handle returned by patch_module_global: start()/stop() and a context manager."""
+
+    def __init__(self, package, name, new, create, mock_kwargs):
+        if new is not _mock.DEFAULT and mock_kwargs:
+            raise TypeError("patch_module_global: mock options need new=mock.DEFAULT")
+        self._package = package
+        self._name = name
+        self._new = _mock.MagicMock(**mock_kwargs) if new is _mock.DEFAULT else new
+        self._create = create
+        self._patchers = []
+
+    def start(self):
+        if not self._patchers:
+            modules = [module for key, module in list(sys.modules.items())
+                       if module is not None and (key == self._package
+                                                  or key.startswith(self._package + "."))]
+            targets = [module for module in modules if self._name in vars(module)]
+            if not targets:
+                if not self._create:
+                    raise AttributeError("%s: no module binds %s"
+                                         % (self._package, self._name))
+                targets = modules
+            try:
+                for module in targets:
+                    patcher = _mock.patch.object(module, self._name, self._new,
+                                                 create=self._create)
+                    patcher._package_fanout = True      # passes guard_package_facade
+                    patcher.start()
+                    self._patchers.append(patcher)
+            except BaseException:
+                self.stop()
+                raise
+        return self._new
+
+    def stop(self):
+        # Each single replacement is stopped at most once, also after mock.patch.stopall().
+        patchers, self._patchers = self._patchers, []
+        for patcher in reversed(patchers):
+            try:
+                patcher.stop()
+            except RuntimeError:
+                pass
+
+    def __enter__(self):
+        return self.start()
+
+    def __exit__(self, *exc):
+        self.stop()
+        return False
+
+
+def patch_module_global(package, name, new=_mock.DEFAULT, create=False, **mock_kwargs):
+    """Replace the global `name` in `package` and in each of its submodules that defines it.
+
+    Works for a plain module and for a package alike (after the state.py -> state/ and
+    tracking.py -> tracking/ moves the code that uses `log` or `time` lives in several
+    modules). Without `new` one MagicMock(**mock_kwargs) replaces the name in every module.
+    When no module binds `name`, create=True adds it to every loaded module of the package
+    (and stop() removes it again); without create that is an AttributeError at start().
+    Every replacement is a mock.patch.object started with start(), so mock.patch.stopall()
+    undoes it as well. Returns an object with start()/stop() and a context manager;
+    start()/__enter__ return the shared replacement.
+    """
+    return _ModuleGlobalPatch(package, name, new, create, mock_kwargs)
 
 
 def nmea_checksum(body):
@@ -317,3 +447,20 @@ def nmea_checksum(body):
 
 def sentence(body):
     return "$%s*%s" % (body, nmea_checksum(body))
+
+
+def exact_fix(fix):
+    """Copy of a test fix whose exact fields mirror its float fields.
+
+    lat_e8/lon_e8/alt_mm are overwritten from lat/lon/alt (None when the float
+    is None or missing), so a fixture with only floats passes the gate that
+    judges the integers. Apply it again after every float variation.
+    """
+    import geo
+    out = dict(fix)
+    for key, exact in (("lat", "lat_e8"), ("lon", "lon_e8")):
+        value = fix.get(key)
+        out[exact] = None if value is None else geo.deg_to_e8(value)
+    alt = fix.get("alt")
+    out["alt_mm"] = None if alt is None else int(round(alt * 1000))
+    return out

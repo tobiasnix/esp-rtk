@@ -51,6 +51,7 @@ class BLEManager:
         self.base_name = name
         self.name = name
         self.command_sink = None
+        self._commands_until_uptime = 0   # uptime s; immune to clock steps
         self.payload_sizes = {}
         self.passkey = int((app.identity or {}).get("ble_pin") or "000000")
 
@@ -263,7 +264,7 @@ class BLEManager:
                 return
         if not raw:
             return
-        maintenance = app.stats.get("ble_commands_until", 0) > time.time()
+        maintenance = app.uptime_seconds() < self._commands_until_uptime
         if (self.command_sink is None or not
                 (CONFIG.get("ble_commands_enabled", False) or maintenance)):
             return
@@ -273,7 +274,7 @@ class BLEManager:
 
     def enable_command_maintenance(self, seconds=600):
         seconds = max(1, min(int(seconds), 600))
-        app.stats["ble_commands_until"] = time.time() + seconds
+        self._commands_until_uptime = app.uptime_seconds() + seconds
         return seconds
 
     async def _notify_chunk(self, conn, chunk):
@@ -299,6 +300,8 @@ class BLEManager:
             except Exception:
                 app.stats["ble_notify_errors"] = app.stats.get("ble_notify_errors", 0) + 1
                 break
+        app.stats["ble_notify_drops"] += 1
+        # Sum of every lost BLE output (queue overflows in fanout.py, notify drops here).
         app.stats["ble_drops"] += 1
         return False
 
@@ -331,6 +334,8 @@ class BLEManager:
                 self.handle_write(value[1], value[0], value[2])
             elif kind == "security":
                 connection, encrypted, authenticated, bonded, key_size = value
+                if not (encrypted and authenticated):
+                    app.stats["ble_auth_failures"] += 1
                 log("INFO" if encrypted and authenticated else "WARN", "BLE",
                     "Security update (%s): encrypted=%s authenticated=%s bonded=%s key=%s."
                     % (connection, encrypted, authenticated, bonded, key_size))

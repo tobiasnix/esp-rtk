@@ -9,6 +9,11 @@ must not silently widen the device's trust boundary.
 DEFAULT_BODY_LIMIT = 4096
 TRACKING_BODY_LIMIT = 262144
 TRACKING_IMPORT_LIMIT = 8 * 1024 * 1024
+STAKEOUT_IMPORT_LIMIT = 131072
+# The device's own schema-2 backup with every field at its validator limit
+# (device bytes: raw UTF-8, up to 4 bytes per character, also pretty-printed);
+# see docs/technical.md, Configuration backup.
+CONFIG_RESTORE_BODY_LIMIT = 16384
 
 _GET = (("GET", "HEAD"), "GET required", DEFAULT_BODY_LIMIT)
 _POST = (("POST",), "POST required", DEFAULT_BODY_LIMIT)
@@ -22,6 +27,7 @@ ROUTES = {
     "/api/label": _GET,
     "/api/access": _GET,
     "/api/ui/live": _GET,
+    "/api/events": _GET,
     "/api/captive": _GET,
     "/diagnostics": _GET,
     "/api/diagnostics": _GET,
@@ -45,7 +51,7 @@ ROUTES = {
     "/api/parallel-benchmark": (("GET", "POST", "DELETE"),
                                 "GET, POST or DELETE required", DEFAULT_BODY_LIMIT),
     "/api/parallel-benchmark/export": _GET,
-    "/api/config/restore": _POST,
+    "/api/config/restore": (("POST",), "POST required", CONFIG_RESTORE_BODY_LIMIT),
     "/api/config/apply": _POST,
     "/api/ble-maintenance": _POST,
     "/api/stream-token/rotate": _POST,
@@ -56,6 +62,7 @@ ROUTES = {
     "/api/config": (("GET", "PUT"), "GET or PUT required", DEFAULT_BODY_LIMIT),
     "/api/measurement-gate": (("GET", "PUT", "DELETE"),
                               "GET, PUT or DELETE required", DEFAULT_BODY_LIMIT),
+    "/api/field-setup": (("GET", "PUT"), "GET or PUT required", DEFAULT_BODY_LIMIT),
     "/api/tcp-auth": (("GET", "PUT"), "GET or PUT required", DEFAULT_BODY_LIMIT),
     "/gnss": (("GET", "POST"), "GET or POST required", DEFAULT_BODY_LIMIT),
     "/api/gnss-command": (("GET", "POST"), "GET or POST required",
@@ -69,11 +76,18 @@ ROUTES = {
                            DEFAULT_BODY_LIMIT),
     "/api/tracking/map": (("GET", "HEAD"), "GET required",
                           DEFAULT_BODY_LIMIT),
+    "/api/stakeout": (("GET", "POST"), "GET or POST required", DEFAULT_BODY_LIMIT),
+    "/api/stakeout/import": (("POST",), "POST required", STAKEOUT_IMPORT_LIMIT),
+    "/api/stakeout/settings": (("GET", "PUT"), "GET or PUT required", DEFAULT_BODY_LIMIT),
+    "/api/stakeout/live": _GET,
+    "/api/stakeout/progress": _GET,
+    "/api/stakeout/export": _GET,
 }
 
-for _probe in ("/generate_204", "/gen_204", "/hotspot-detect.html",
-               "/library/test/success.html", "/ncsi.txt", "/connecttest.txt",
-               "/redirect"):
+CAPTIVE_PROBES = ("/generate_204", "/gen_204", "/hotspot-detect.html",
+                  "/library/test/success.html", "/ncsi.txt", "/connecttest.txt",
+                  "/redirect")
+for _probe in CAPTIVE_PROBES:
     ROUTES[_probe] = _GET
 
 

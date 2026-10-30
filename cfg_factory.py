@@ -47,7 +47,7 @@ def factory_reset(config, defaults, clear_keys, save, log):
                      if name.startswith(("tracking.segment-", "survey-export-"))
                      or (name.startswith("tracking.jsonl.points-v1.jsonl.g") and
                          name.endswith(".pjs"))
-                     or name.endswith((".ndjson.tmp", ".tracking.tmp")))
+                     or name.endswith((".ndjson.tmp", ".tracking.tmp", ".unreadable")))
     except OSError:
         pass
     for path in paths:
@@ -61,6 +61,11 @@ def factory_reset(config, defaults, clear_keys, save, log):
 
 def generate_ap_password():
     return "gnss-" + ubinascii.hexlify(os.urandom(6)).decode()
+
+
+def new_boot_id():
+    """A random identity for this boot (8 hex characters); kept in RAM only."""
+    return ubinascii.hexlify(os.urandom(4)).decode()
 
 
 def derive_ap_password(mac):

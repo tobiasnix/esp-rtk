@@ -32,7 +32,7 @@ MicroPython then executes `main.py`.
 
 ## 2. Module imports
 
-`main.py` imports the application modules. At the end of `tracking.py` the
+`main.py` imports the application modules. At the end of `tracking/__init__.py` the
 shared instance is created as `Tracker(autoload=False,
 point_store_autoload=False)`, so the import creates neither loaded projects nor
 a scanned point store.
@@ -59,6 +59,12 @@ the level is sampled every 100 ms for `FACTORY_RESET_WINDOW_MS` (12 s):
 ten seconds of hold trigger a factory reset followed by a restart, three
 seconds force setup mode. Releasing before three seconds does nothing.
 
+Setup mode keeps the setup access point for `SETUP_HOLD_MS` (600 s) without
+station attempts. This holds for the three-second hold and also when no
+network is configured. After the window the flag `force_setup` is cleared and
+the device resumes joining the configured networks; saving the configuration
+restarts it earlier.
+
 ## 5. Crash evidence
 
 If the failed-boot counter is above zero and the RTC flight recorder from the
@@ -75,7 +81,7 @@ recovery.
 
 ## 7. Safe mode, or the full service set
 
-In safe mode only a network manager is created, and the started tasks are
+In safe mode only a network manager is created and registered (so the Wi-Fi scan works), and the started tasks are
 `field_diagnostics`, `watchdog`, `gc`, `network`, `http`, and `discovery`.
 NTRIP, BLE, and GNSS stay disabled, so the portal remains reachable for
 repair. See [technical.md](technical.md), *Safe mode*.
@@ -105,22 +111,29 @@ Only then are the supervised tasks created and handed to the event loop:
 `tracking_startup = {"state": "loading"}` and then calls
 `tracker.initialize_async()`, which
 
-1. loads the point store,
-2. consumes the recovery generator, yielding to the event loop and feeding the
+1. completes a published restore or deletes an unpublished restore staging,
+   one rename or remove per scheduler turn,
+2. loads the point store,
+3. consumes the recovery generator, yielding to the event loop and feeding the
    task heartbeat every 16 steps: recover the index, load the checkpoint,
    replay the journal segments that are newer than the checkpoint, repair
    active references, recompute every line summary whose vertex count no
    longer matches the line, and rewrite the small index,
-3. loads the archive index.
+4. deletes point-store segment files that no manifest names, but only after
+   the main manifest itself loaded,
+5. loads the archive index.
 
 A summary that has to be recomputed is read through a sequential line
 iterator over the point store, one step per vertex, instead of a random read
 per position.
 
 On success the state becomes `{"state": "ready", "duration_ms": ...}` and the
-log records `Survey storage ready: <n> points in <ms> ms.` On failure the
-tracker stays unloaded, the state becomes `{"state": "error"}`, the log
-records `Survey recovery failed: ...`, and the task keeps its heartbeat alive
+log records `Survey storage ready: <n> points in <ms> ms.`; what steps 1 and 4
+repaired is published as `stats.storage_recovery` in `/status`. On failure the
+tracker stays unloaded, the state becomes `{"state": "error", "code": ...,
+"message": ...}` (`restore_commit_unreadable` or `restore_install_failed` for a
+survey restore that cannot be finished, otherwise `survey_recovery_failed`), the
+log records `Survey recovery failed: ...`, and the task keeps its heartbeat alive
 so the watchdog does not restart the device.
 
 After a restart the first map request delivers a complete map; incremental
@@ -136,13 +149,16 @@ updates resume after that.
 - `/api/tracking`, `/api/tracking/map`, `/api/tracking/line`, and
   `/api/tracking/export` answer `503` with the error code `survey_loading`
   rather than reading or changing a partially recovered survey.
-  `/api/tracking/import` answers `409 storage_busy`, and arming the parallel
-  benchmark answers `503 survey_loading`.
+  `/api/tracking/import` answers `409 storage_busy` while loading,
+  `503 survey_unavailable` after a failed start-up and
+  `409 restore_install_pending` while a published restore waits for a restart,
+  and arming the parallel benchmark answers `503 survey_loading`.
 - Automatic survey points are refused until recovery has finished; the
   existing acceptance gate and the GNSS start-up guard continue to apply
   afterwards.
 - `GET /api/ui/live` always carries `tracking_startup` at the top level, with
-  the states `loading`, `ready` (with `duration_ms`), and `error`.
+  the states `loading`, `ready` (with `duration_ms`), and `error` (with
+  `code` and `message`).
   `GET /status` carries the same object inside `tracking` while the survey is
   not loaded; once it is ready, the field is gone and the full survey status
   takes its place.

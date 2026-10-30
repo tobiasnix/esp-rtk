@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import support
 from support import web
 import tracking
 import pointstore
@@ -72,7 +73,7 @@ class TestCheckpointHttpServiceWindow(unittest.IsolatedAsyncioTestCase):
 
             configured = tracking.CHECKPOINT_IO_SERVICE_MS if service_window is None else service_window
             try:
-                with mock.patch.object(tracking, 'CHECKPOINT_IO_SERVICE_MS', configured), \
+                with support.patch_module_global('tracking', 'CHECKPOINT_IO_SERVICE_MS', configured), \
                      mock.patch.object(tracker, '_write_checkpoint', side_effect=checkpoint), \
                      mock.patch.object(tracker, '_write_index', side_effect=index), \
                      mock.patch.object(pointstore.FlashPointStore, 'load_async', verify), \

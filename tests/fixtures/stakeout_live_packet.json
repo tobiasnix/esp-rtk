@@ -1,0 +1,10 @@
+{"schema": 1, "device_time": 1760000123, "fix_seq": 10, "fix_rev": 0, "fix_age_ms": 320, "stale": false,
+ "position": {"lat_e8": 5100000000, "lon_e8": 1000000000, "alt_mm": 412345, "qual": 4, "fix_status_text": "RTK_FIXED",
+  "sats": 21, "hdop": 0.6, "correction_age_sec": 1.0, "gst_h_sigma_m": 0.011, "gst_v_sigma_m": 0.018},
+ "corrections": {"ntrip_state": "streaming", "rtcm_age_sec": 0.8, "link": "ok"},
+ "gate": {"accepted": true, "reasons": []},
+ "motion": {"speed_mps": 0.0, "course_deg": null, "valid": false},
+ "header": {"access_state": "ONLINE", "storage_level": "ok"},
+ "target": {"tid": "so-3a4739b9/2/1", "lat_e8": 5100000027, "lon_e8": 999999943, "status": "open"},
+ "guidance": {"state": "ready", "dn_m": 0.03, "de_m": -0.04, "dist_m": 0.05, "bearing_deg": 306.9,
+  "tolerance_m": 0.1, "fine_radius_m": 5.0, "window": {"have": 5, "need": 5, "spread_m": 0.004}, "reasons": []}}

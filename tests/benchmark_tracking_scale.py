@@ -15,7 +15,9 @@ import tracking
 MEASUREMENT = {
     "recorded_at": 1, "fix_quality": 4, "fix_status": "RTK_FIXED",
     "satellites": 24, "hdop": 0.6, "correction_age_sec": 0.5,
-    "station_id": "SYNTHETIC", "source": "automatic",
+    "station_id": "SYNTHETIC", "source": "automatic", "precision": "e8",
+    "geoid_sep_mm": 45600, "alt_ellipsoid_mm": 145600, "reference_frame": None,
+    "reference_frame_epoch": None, "ntrip_mount": None, "antenna_height_mm": 0,
     "accuracy_observation": {"samples": 5, "rtk_fixed_samples": 5,
         "horizontal_mean_deviation_m": 0.002, "horizontal_max_deviation_m": 0.004,
         "vertical_mean_deviation_m": 0.003, "vertical_max_deviation_m": 0.006},
@@ -35,8 +37,8 @@ def payload(count):
     for index in range(count):
         item = copy.deepcopy(MEASUREMENT); item["recorded_at"] = index + 1
         measurements.append(item)
-        coordinates.append([10.0 + index * 0.000001, 40.0, 100.0 + index % 7 / 100])
-    return {"kind": "survey_backup", "schema_version": 2,
+        coordinates.append([1000000000 + index * 100, 4000000000, 100000 + index % 7 * 10])
+    return {"kind": "survey_backup", "schema_version": tracking.SCHEMA_VERSION,
         "active_project_id": "synthetic-project", "active_line_id": None,
         "auto_distance_m": 1.0, "projects": [{"id": "synthetic-project",
         "name": "Synthetic scale data", "description": "", "created_at": 1,
@@ -100,7 +102,7 @@ def archived_run():
 
 
 if __name__ == "__main__":
-    tracking.MAX_FEATURES = tracking.TARGET_MAX_FEATURES
+    support.patch_module_global("tracking", "MAX_FEATURES", tracking.TARGET_MAX_FEATURES).start()
     results = [run(count) for count in (5000, 8000, 10000)]
     results.append(archived_run())
     print(json.dumps({"synthetic": True, "schema_version": tracking.SCHEMA_VERSION,

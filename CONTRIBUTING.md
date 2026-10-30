@@ -63,21 +63,61 @@ consistently (an old product name must never reappear). Any change to a page,
 a translation key, or the navigation should keep these tests passing, and add
 to them where the new behaviour is not already covered.
 
+## Building the field app
+
+`app.js` is build output. **Never edit it directly.** The sources are the
+files `src/NN-name.js`; `push.py` concatenates them in file-name order (the
+two-digit prefix is the slot) into one shared IIFE, so the result is a single
+script. Slot 95 is reserved for the stakeout code and `99-boot.js` always
+comes last. After changing a source, rebuild and commit `src/`, `app.js` and
+`app.js.gz` together:
+
+```sh
+python3 push.py . --build-only          # writes app.js and the .gz copies
+python3 push.py . --build-only --check  # writes nothing; exit 1 if stale (as in CI)
+```
+
+`tests/test_build.py` and the CI step run the same check, so a direct edit of
+`app.js` or a forgotten rebuild fails there.
+
+## Browser acceptance
+
+The Playwright mock-browser suites run with one command, locally and in CI:
+
+```sh
+python3 tests/browser_acceptance.py --install   # once: pinned Playwright + Chromium
+python3 tests/browser_acceptance.py             # all suites
+python3 tests/browser_acceptance.py --list      # suite names
+python3 tests/browser_acceptance.py --suite NAME
+```
+
+On a fresh Linux machine add `--with-deps` to `--install` to install the
+system libraries (needs root). The Playwright version is pinned in the runner.
+The runner builds the app first and writes the UI shell to a temporary file
+(`--html PATH` keeps it).
+
 ## Deploying to a board
 
-`push.py` transfers only the files listed in its `BOARD_FILES` allowlist to a
-connected board over the serial port, verifies every write by SHA-256, and
-restarts the board afterwards:
+`push.py` builds `app.js` and the `.gz` copies first, then transfers only the
+files listed in its `BOARD_FILES` allowlist to a connected board over the
+serial port, verifies every write by SHA-256, and restarts the board:
 
 ```sh
 python3 push.py . /dev/ttyACM0 --skip-unchanged
 ```
 
-`--skip-unchanged` skips files whose checksum on the board already matches, so
-repeated pushes during development are fast. After changing any JavaScript or
-CSS file, raise `ASSET_VERSION` in `assets.py` — the device caches those files
-long-term and immutably, and browsers will otherwise keep serving the old
-version.
+Files that are already identical on the board are always skipped
+(`--skip-unchanged` is accepted for compatibility), and `assets.py` is written
+last, so an interrupted push can simply be repeated. Unknown options are
+rejected with exit code 2 instead of being ignored.
+
+After changing any JavaScript or CSS file, raise `ASSET_VERSION` in
+`assets.py` — the device caches those files long-term and immutably, and
+browsers will otherwise keep serving the old version. As a safety net, when a
+checkout is pushed `push.py` aborts if browser assets changed but the
+`ASSET_VERSION` equals the one on the board. Pass
+`--allow-stale-asset-version` only for development builds. Pushes of a single
+file or of a folder without `src/` (such as backups) are not checked.
 
 ## Never attach credentials or diagnostic exports with real positions
 

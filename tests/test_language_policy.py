@@ -9,6 +9,8 @@ import tempfile
 import unittest
 import ast
 
+from source_checks import production_packages
+
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOURCE_EXTENSIONS = (".py", ".js", ".css", ".html", ".sh")
@@ -29,12 +31,13 @@ def _excluded_names(repo=REPO):
 
 
 def _is_git_checkout(repo=REPO):
-    """True if `repo` has a .git directory, i.e. `git ls-files` will work.
+    """True if `repo` has a .git entry, i.e. `git ls-files` will work.
 
-    A release tarball has no such directory, so a test that shells out to
+    The entry is a directory in a normal clone and a file in a linked
+    worktree. A release tarball has neither, so a test that shells out to
     git must not crash there.
     """
-    return os.path.isdir(os.path.join(repo, ".git"))
+    return os.path.exists(os.path.join(repo, ".git"))
 
 
 def repository_sources():
@@ -86,6 +89,15 @@ class TestGitCheckoutDetection(unittest.TestCase):
         os.makedirs(os.path.join(repo, ".git"))
         self.assertTrue(_is_git_checkout(repo))
 
+    def test_a_worktree_with_a_dot_git_file_is_a_git_checkout(self):
+        # A linked worktree has a .git *file* ("gitdir: ...") instead of a
+        # directory; git ls-files works there just the same.
+        repo = tempfile.mkdtemp(prefix="esp-rtk-worktree-")
+        self.addCleanup(shutil.rmtree, repo, True)
+        with open(os.path.join(repo, ".git"), "w", encoding="utf-8") as handle:
+            handle.write("gitdir: /elsewhere/.git/worktrees/sample\n")
+        self.assertTrue(_is_git_checkout(repo))
+
 
 class TestCanonicalNames(unittest.TestCase):
     def test_removed_german_identifiers_do_not_return(self):
@@ -110,9 +122,11 @@ class TestCanonicalNames(unittest.TestCase):
             r"und|oder|aber|wenn|dann|sonst|ohne|fuer|ueber|zur|zum|wird|"
             r"werden|bleibt|kein|keine|nicht|hier|beim|damit|geraet|"
             r"konfiguration|antwort|pruefsumme|ungueltig|fehler)\b)", re.I)
-        for name in os.listdir(REPO):
-            if not name.endswith(".py"):
-                continue
+        names = [name for name in os.listdir(REPO) if name.endswith(".py")]
+        for package in production_packages(REPO):
+            names += [package + "/" + name for name in os.listdir(os.path.join(REPO, package))
+                      if name.endswith(".py")]
+        for name in names:
             path = os.path.join(REPO, name)
             with open(path, encoding="utf-8") as source:
                 tree = ast.parse(source.read(), filename=path)

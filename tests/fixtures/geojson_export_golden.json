@@ -1,0 +1,22 @@
+{
+  "assigned": {
+    "bytes": 14441,
+    "sha256": "442d65a46c6124d4658bc7f5c2301b0c11cddff64a273b839752fb071ec53d2c"
+  },
+  "large": {
+    "bytes": 5187091,
+    "sha256": "ee211597fc5af33e12057849f06c20e37033105d133e8c1c95188b834a8af949"
+  },
+  "long": {
+    "bytes": 4900806,
+    "sha256": "70fc59fdcddfeceae4cc9cb693b04498ca7e382119639db09a6a17c333859357"
+  },
+  "mixed": {
+    "bytes": 14095,
+    "sha256": "74a11f6c25db28ac7be166a06f09d89a0514164860983e2647061d20514b873d"
+  },
+  "mixed_stale_summary": {
+    "bytes": 14095,
+    "sha256": "74a11f6c25db28ac7be166a06f09d89a0514164860983e2647061d20514b873d"
+  }
+}

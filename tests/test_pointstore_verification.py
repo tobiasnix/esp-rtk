@@ -32,7 +32,7 @@ class TestPointstoreVerification(unittest.IsolatedAsyncioTestCase):
 
     def populate(self):
         for order in range(1, 25):
-            self.store.append(order, "line-a", [8.0, 50.0, order],
+            self.store.append(order, "line-a", [800000000, 5000000000, order * 1000],
                 {"record_order": order, "profile_id": "profile-a"})
         self.store.sync()
         self.assertGreater(len(self.store.segments), 1)
@@ -89,7 +89,7 @@ class TestPointstoreVerification(unittest.IsolatedAsyncioTestCase):
         self.store.close()
         tail = Path(self.store._segment_path(self.store.segments[-1]))
         with tail.open("ab") as target:
-            target.write(b'[2,25,"line-a",')
+            target.write(b'[3,25,"line-a",')
         with self.assertRaises(ValueError):
             await probe.load_async(verified_store=self.store)
         with self.assertRaises(ValueError):
@@ -146,7 +146,7 @@ class TestPointstoreVerification(unittest.IsolatedAsyncioTestCase):
     async def test_historical_counts_explain_later_adds_and_multiple_undos(self):
         self.populate()
         boundary = self.store.max_order
-        self.store.append(25, "line-a", [8.1, 50.0, 101], {"record_order": 25})
+        self.store.append(25, "line-a", [810000000, 5000000000, 101000], {"record_order": 25})
         for order in (26, 27, 28):
             self.store.remove_last(order, "line-a")
         self.store.sync()

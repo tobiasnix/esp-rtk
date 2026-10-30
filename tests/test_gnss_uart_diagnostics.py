@@ -139,6 +139,26 @@ class TestGnssUartDiagnostics(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stats["uart_rx_rate_max_bytes_sec"], 272)
             self.assertEqual(stats["uart_rx_rate_window_ms"], 4000)
 
+    async def test_silent_uart_reports_zero_rate_after_one_empty_window(self):
+        handler = gnss.GNSSHandler(object())
+        handler._uart_rate_started = 0
+        with mock.patch.dict(gnss.app.stats, {}, clear=True), \
+                mock.patch.object(gnss.app, "note_uart_data", create=True):
+            handler._record_uart_read(100, b"a" * 100, 590, 600)
+            stats = gnss.app.stats
+            gap = stats["uart_read_gap_ms"]
+            handler._close_rate_window(1000)
+            self.assertEqual(stats["uart_rx_rate_bytes_sec"], 100)
+            self.assertEqual(stats["uart_rx_rate_window_ms"], 1000)
+            # The window in which the silence starts still carries its bytes.
+            handler._close_rate_window(1999)
+            self.assertEqual(stats["uart_rx_rate_bytes_sec"], 100)
+            handler._close_rate_window(2000)
+            self.assertEqual(stats["uart_rx_rate_bytes_sec"], 0)
+            self.assertGreaterEqual(stats["uart_rx_rate_window_ms"], 1000)
+            self.assertEqual(stats["uart_rx_rate_max_bytes_sec"], 100)
+            self.assertEqual(stats["uart_read_gap_ms"], gap)
+
     async def test_simulated_full_uart_ring_can_drop_bytes_without_python_overflow(self):
         # This models one possible upstream drop policy, not the ESP-IDF driver.
         expected = [(sentence("GNRMC,%06d,A,5000.000000,N,00800.0000,E,0.0,0.0,080926,,,A"

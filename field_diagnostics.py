@@ -17,6 +17,7 @@ MAX_NMEA = 48
 MAX_RTCM_QUEUE = 8192
 SAMPLE_INTERVAL_MS = 5000
 FLUSH_INTERVAL_MS = 30000
+FLUSH_SLICE_BYTES = 4096
 MAX_SIGNAL_OBSERVATIONS = 128
 
 
@@ -150,9 +151,15 @@ class FieldRecorder:
         self.last_write_ms = 0
         self.max_write_ms = 0
         self.flush_count = 0
+        # Bytes that may still be written without a new statvfs reserve check.
+        self._reserve_budget = 0
+        # The budget was checked for the next segment, which may start on it.
+        self._prepared = False
         self.last_sample = None
         self._last_ticks = time.ticks_ms()
         self._uptime_ms = 0
+        # Sampling deadline of run(); start() moves it so the first window is complete.
+        self._sample_due = self._last_ticks
 
     def stamp(self, kind, data):
         now = time.ticks_ms()
@@ -209,6 +216,11 @@ class FieldRecorder:
         self._persist(True, session)
         self.session = session
         self.enabled = True
+        # Drop lag from the boot phase or the pause between recordings. The first
+        # sample is due one full interval later, so its window has seen the ticker.
+        from state import app
+        app.take_loop_lag_window_max()
+        self._sample_due = time.ticks_ms()
         self.error = None
         self.probe = CorrectionProbe()
         self.current = None
@@ -328,22 +340,50 @@ class FieldRecorder:
         return True
 
     def _space(self, required):
+        # statvfs walks the whole LittleFS volume (0.5-0.6 s measured on the
+        # device), so a successful check grants a budget that later batches spend
+        # without a new check. The budget is capped at one segment plus this
+        # request and every new segment checks again, so after other writers
+        # (tracking) have consumed the reserve, the recorder itself can overshoot
+        # the 20 % line by at most one segment plus this request before the next
+        # check.
+        if self._reserve_budget >= required:
+            return
         folder = self.prefix.rsplit("/", 1)[0] if "/" in self.prefix else "."
         while True:
             stat = os.statvfs(folder)
-            if stat[0] * stat[3] - required >= stat[0] * stat[2] // 5:
+            headroom = stat[0] * stat[3] - stat[0] * stat[2] // 5
+            if headroom - required >= 0:
+                self._reserve_budget = min(headroom, self.segment_bytes + required)
                 return
             if not self.files or not self._remove_oldest():
+                self._reserve_budget = 0
                 raise OSError("storage_reserve")
 
+    def _spend_reserve(self, written):
+        self._reserve_budget = max(0, self._reserve_budget - written)
+
+    def _rotation_due(self, size):
+        return self.current is None or self.current[2] + size > self.segment_bytes
+
+    def _prepare_segment(self, required):
+        """Close the current segment, make room in the ring and check the reserve
+        once for exactly the next segment, whose first write may spend it."""
+        self.current = None
+        self._prepared = False
+        self._reserve_budget = 0
+        while len(self.files) >= self.max_segments:
+            self._remove_oldest()
+        self._space(required)
+        self._prepared = True
+
     def _write(self, data):
-        rotate = self.current is None or self.current[2] + len(data) > self.segment_bytes
-        if rotate:
-            self.current = None
-            while len(self.files) >= self.max_segments:
-                self._remove_oldest()
+        rotate = self._rotation_due(len(data))
+        if rotate and not self._prepared:
+            self._prepare_segment(len(data) + 8192)
         # One reserve check per batch, including the possible segment header.
         self._space(len(data) + 8192)
+        self._prepared = False
         if rotate:
             self.sequence += 1
             path = "%s-%08d.jsonl" % (self.prefix, self.sequence)
@@ -355,16 +395,24 @@ class FieldRecorder:
                                 "gsv_format": "compact latest checksum-valid GSV/GSA observations",
                                 "rtcm_format": "CRC24Q-valid frame counts and MSM signal masks",
                                 "power_loss": "pending records may be lost; ignore incomplete final lines"})
+            line = (json.dumps(header) + "\n").encode()
             with open(path, "wb") as handle:
-                handle.write((json.dumps(header) + "\n").encode())
+                handle.write(line)
+            self._spend_reserve(len(line))
             self.current = [self.sequence, path, os.stat(path)[6]]
             self.files.append(self.current)
         with open(self.current[1], "ab") as handle:
             if handle.write(data) != len(data):
                 raise OSError("short_write")
+        self._spend_reserve(len(data))
         self.current[2] += len(data)
 
-    def flush(self):
+    def flush(self, max_bytes=None):
+        """Write all pending records, or with max_bytes exactly one batch.
+
+        A bounded batch always takes its first record, even a larger one, and
+        further records only while the batch stays within max_bytes.
+        """
         started = time.ticks_ms()
         had_records = bool(self.events)
         try:
@@ -374,21 +422,32 @@ class FieldRecorder:
                 encoded = []
                 size = 0
                 limit = min(32768, self.segment_bytes // 2)
+                bound = limit if max_bytes is None else min(limit, max_bytes)
                 for record in self.events:
                     line = (json.dumps(record) + "\n").encode()
                     if len(line) > limit:
                         raise ValueError("record_too_large")
-                    if size + len(line) > limit:
+                    if encoded and size + len(line) > bound:
                         break
                     encoded.append(line)
                     size += len(line)
+                if max_bytes is not None and self._rotation_due(size) and not self._prepared:
+                    # The new segment's statvfs takes this slice on its own; the
+                    # next slice writes header and data on the checked budget.
+                    self._prepare_segment(size + 8192)
+                    break
                 self._write(b"".join(encoded))
                 del self.events[:len(encoded)]
+                if max_bytes is not None:
+                    break
             self.error = None
         except (OSError, ValueError, MemoryError) as error:
             self.error = "storage_reserve" if str(error) == "storage_reserve" else "write_failed"
             # Do not append valid JSON to a possibly torn final record.
             self.current = None
+            # Check the reserve again on the next attempt.
+            self._reserve_budget = 0
+            self._prepared = False
         self.last_write_ms = max(0, time.ticks_diff(time.ticks_ms(), started))
         self.max_write_ms = max(self.max_write_ms, self.last_write_ms)
         if had_records:
@@ -414,28 +473,38 @@ class FieldRecorder:
                 pass
         selected = {key: fix.get(key) for key in
                     ("utc", "qual", "sats", "hdop", "lat", "lon", "alt",
+                     "lat_e8", "lon_e8", "alt_mm", "geoid_sep_mm",
                      "correction_age_sec", "station_id", "receiver_accuracy")}
+        alt_mm, geoid_mm = fix.get("alt_mm"), fix.get("geoid_sep_mm")
+        selected["alt_ellipsoid_mm"] = (alt_mm + geoid_mm if type(alt_mm) is int and type(geoid_mm) is int
+                                        else None)
         gst = selected.get("receiver_accuracy")
         if gst:
             selected["receiver_accuracy"] = {key: gst.get(key) for key in
                 ("utc", "horizontal_sigma_m", "altitude_sigma_m")}
         now = time.ticks_ms()
         flow = ntrip.flow_summary() if ntrip else {}
+        epoch_age = ntrip.rtcm.epoch_age_ms(now) if ntrip else None
+        epoch_age_sec = None if epoch_age is None else round(epoch_age / 1000, 1)
         data = {"fix": selected,
-                "fix_age_ms": None if app.last_fix_time is None else
-                max(0, time.ticks_diff(now, app._last_update_ms)),
+                "fix_age_ms": app.fix_age_ms(now),
+                "fix_stale": app.fix_is_stale(now),
                 "sample_gap_ms": None if self.last_sample is None else time.ticks_diff(now, self.last_sample),
+                "loop_lag_max_ms": app.take_loop_lag_window_max(),
                 "route_startup": app.stats.get("route_startup"),
                 "wifi": {"state": app.stats.get("access_state"), "profile": app.stats.get("wifi_profile"),
                          "link_connected": link_connected,
                          "ready_event": app.wifi_connected_event.is_set(), "radio": radio},
                 "ntrip": {"state": app.stats.get("ntrip_state"), "endpoint": app.stats.get("ntrip_endpoint"),
                           "bytes": app.stats.get("ntrip_bytes"), "gga_sent": app.stats.get("ntrip_gga_sent"),
+                          "epoch_age_sec": epoch_age_sec, "substate": app.stats.get("ntrip_substate"),
                           "uart_short_writes": flow.get("uart_short_writes"),
+                          "service_crs": ntrip.rtcm.service_crs if ntrip else None,
                           "flow": {key: flow.get(key) for key in
                                    ("connections", "read_timeouts", "rx_age_ms", "rx_chunks",
                                     "rx_gap_max_ms", "uart_write_max_ms", "gga_failures",
-                                    "gga_gap_max_ms")}},
+                                    "gga_gap_max_ms", "dns_ms", "dns_max_ms", "dns_unseparated",
+                                    "connect_ms", "connect_max_ms")}},
                 "storage": {"flush_count": self.flush_count,
                             "last_write_ms": self.last_write_ms,
                             "max_write_ms": self.max_write_ms},
@@ -468,8 +537,9 @@ class FieldRecorder:
     async def run(self):
         from state import app, shutdown_event
         self.initialize()
-        due = time.ticks_ms()
-        flush_due = due
+        self._sample_due = time.ticks_ms()
+        flush_due = self._sample_due
+        draining = False
         while not shutdown_event.is_set():
             app.beat("field_diagnostics")
             if self.enabled:
@@ -484,12 +554,21 @@ class FieldRecorder:
                     await asyncio.sleep_ms(0)
                 self._consume_nmea(4)
                 now = time.ticks_ms()
-                if time.ticks_diff(now, due) >= SAMPLE_INTERVAL_MS:
-                    due = now
+                if time.ticks_diff(now, self._sample_due) >= SAMPLE_INTERVAL_MS:
+                    self._sample_due = now
                     self.sample()
                 if time.ticks_diff(now, flush_due) >= FLUSH_INTERVAL_MS:
                     flush_due = now
-                    self.flush()
+                    draining = True
+                # Drain in slices, one per loop pass: a single 27 KB batch held
+                # the loop for 0.6-0.7 s plus statvfs, a single record <= 0.25 s.
+                # A write error ends the drain until the next due interval.
+                if draining:
+                    self.flush(FLUSH_SLICE_BYTES)
+                    draining = bool(self.events) and self.error is None
+            else:
+                # stop() has already written everything synchronously.
+                draining = False
             await asyncio.sleep_ms(50)
         self.flush()
 

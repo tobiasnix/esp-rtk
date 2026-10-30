@@ -4,7 +4,7 @@ import time
 import uasyncio as asyncio
 
 from cfg import CONFIG, log
-from state import app, shutdown_event
+from state import NTRIP_STATES, app, shutdown_event
 
 
 def xor_checksum(payload):
@@ -59,6 +59,11 @@ def _rssi():
         return None
 
 
+def pesps_ntrip_state(state):
+    """Map internal NTRIP states onto the seven published `$PESPS` values."""
+    return state if state in NTRIP_STATES else "backoff"
+
+
 class EspTelemetryTask:
     def __init__(self, queue, ntrip):
         self.queue = queue
@@ -69,7 +74,7 @@ class EspTelemetryTask:
         identity = app.identity or {}
         return build_pesps(
             identity.get("device_id"), app.stats.get("uptime_sec", 0),
-            app.stats.get("ntrip_state", "disabled"),
+            pesps_ntrip_state(app.stats.get("ntrip_state", "disabled")),
             rtcm.get("last_msg_age_sec"), rtcm.get("bytes_total", 0),
             rtcm.get("msm", ()), _rssi(), app.stats.get("net_mode"),
             app.stats.get("ble_drops", 0))

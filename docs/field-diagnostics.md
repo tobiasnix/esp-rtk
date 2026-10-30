@@ -39,17 +39,32 @@ read a reset cause alone as proof of an electrical defect.
 | `fix_change` | Previous and new GGA quality, plus the GGA UTC field |
 | `access_state`, `ntrip_state` | Transitions of the two published state machines |
 | `wifi_attempt`, `wifi_result`, `wifi_lost`, `wifi_restored`, `wifi_backoff` | Station attempts and their outcome |
-| `ntp` | `synchronized` or `failed` |
-| `ntrip_first_data`, `ntrip_end`, `ntrip_error`, `ntrip_backoff` | Correction stream boundaries; `ntrip_end` carries `eof` or `idle_timeout` |
+| `ntp` | `synchronized`, `failed`, or `deferred` (a recording was running; the sync runs after it ends) |
+| `clock_resync` | The RTC was stepped to the receiver's RMC time: `reason` (`drift` for a deviation over 1 s, `interval` for the hourly check), `delta_s` (new minus old), and `old` / `new` as UTC text |
+| `ntrip_first_data`, `ntrip_end`, `ntrip_error`, `ntrip_backoff` | Correction stream boundaries; `ntrip_end` carries the reason `eof`, `idle_timeout`, `stale_backlog`, or `reload` (a change of the caster settings ended the attempt; it is not counted as a failure); `ntrip_first_data`, `ntrip_end` and `ntrip_error` also carry the connection attempt's number `attempt`, `dns_ms` (`null` when not reached or unseparated), `connect_ms`, and `attempt_age_ms` (time since the attempt started) |
+| `ntrip_substate` | The stream went stale or recovered: `previous`, `state` (`stale` or `null`), and `epoch_age_sec` at that moment; see below |
+| `receiver_link` | The receiver UART went silent or resumed: `previous`, `state` (`silent` or `ok`), `silence_ms` |
 
 A `sample` record holds:
 
 - the current GGA fix: UTC, quality, satellites, HDOP, latitude, longitude,
-  altitude, correction age, station ID, and the same-epoch GST horizontal and
-  altitude standard deviations,
+  altitude, the exact integers `lat_e8` and `lon_e8` (1e-8 degrees) and
+  `alt_mm` and `geoid_sep_mm` (millimetres), `alt_ellipsoid_mm` (their sum,
+  `null` unless both exist), the receiver's correction age
+  (`correction_age_sec`), station ID, and the same-epoch GST horizontal and
+  altitude standard deviations. `lat_e8` and `lon_e8` are `null` at fix quality
+  0 or when the receiver's text is not a valid coordinate, and every fix
+  field is `null` before the first GGA of a boot,
 - the latest independent GST with its own epoch and a monotonic `gst_age_ms`,
-  even while the GGA/GST pairing is still pending, plus `fix_age_ms` and the
-  actual interval as `sample_gap_ms`,
+  even while the GGA/GST pairing is still pending, plus `fix_age_ms` (tick-based
+  age of the last published GGA; `null` before the first fix) with `fix_stale`
+  (true once that age reaches `fix_stale_after_ms`, 3 s by default, and until a
+  new GGA is published) and the actual interval as `sample_gap_ms`, and
+  `loop_lag_max_ms`: the largest delay of a 100 ms event-loop ticker beyond its
+  tick since the previous sample or the start of the recording, `null` if the
+  ticker did not run. A marker does not create a sample, so a delay just before
+  a marker appears in the next sample. These are maxima of about five-second
+  windows and are not comparable with percentiles over individual ticks,
 - `signal_summary`: checksum-valid GSV and GSA sentences compacted in RAM
   outside the GNSS receive path. `observations` keeps the latest talker,
   signal ID, satellite ID, elevation, azimuth, and C/N0 per satellite within
@@ -57,7 +72,9 @@ A `sample` record holds:
   An empty interval means nothing was captured; stale observations are not
   repeated,
 - `rtcm`: frame counts by message type, validated with CRC24Q, plus CRC
-  failures, truncated frames, and the age of the last valid frame. Connection
+  failures, truncated frames, and the age of the last valid frame
+  (`valid_frame_age_ms`; like the arrival age it shows that bytes keep coming,
+  not how old their content is). Connection
   boundaries discard and separately count a partial frame instead of joining
   two unrelated TCP streams into a false CRC error. MSM records carry station,
   satellite and signal masks, the raw constellation-specific epoch, the
@@ -66,7 +83,10 @@ A `sample` record holds:
 - `wifi` (access state, profile, link state, radio RSSI and channel) and
   `ntrip` (state, endpoint label, byte and GGA counters, receive age, read
   timeouts, connection and chunk counters, receive-gap and UART write maxima,
-  GGA failure and gap counters),
+  GGA failure and gap counters, name-resolution and TCP-connect durations
+  (last and maximum) and the count of unseparated measurements, plus `epoch_age_sec` and `substate`: the epoch
+  age of the last decoded MSM message in seconds, rounded to 0.1 s, and `stale` or
+  `null`; see *Correction ages in the log* below),
 - `storage`: flush count and the last and maximum write duration,
 - `drops`: dropped events, dropped NMEA lines, dropped RTCM bytes,
 - `runtime`: CRC errors, GGA parse errors, queue overflows, task restarts.
@@ -89,7 +109,57 @@ so on - the effective configured order - or `unconfigured`; NTRIP events name
 the endpoint as `primary` or `fallback`, and an `ntrip_error` carries the
 exception class name and errno rather than its message. An `ntrip_end` with
 reason `idle_timeout` includes the measured monotonic silence and the
-configured threshold (`ntrip_idle_timeout_sec`, 15 s by default).
+configured threshold (`ntrip_idle_timeout_sec`, 15 s by default), and one with
+reason `stale_backlog` includes the `epoch_age_sec` at that moment. The
+attempt timing on `ntrip_first_data`, `ntrip_end` and `ntrip_error` places every
+resolution in time without an extra event: it began `attempt_age_ms` before the
+event's `up_ms` and ended `dns_ms` later. When the address format of the
+resolver result is not recognized, resolution and connect cannot be separated:
+`dns_ms` is `null` and `connect_ms` covers the whole attempt.
+
+## Correction ages in the log
+
+The three ages (arrival age, epoch age, and the receiver's correction age) are
+defined once, in [technical.md](technical.md#correction-ages); this section
+only says where each one appears in a recording.
+
+| Age | Where in the log |
+|---|---|
+| Arrival age | `rtcm.valid_frame_age_ms` and `ntrip.flow.rx_age_ms` in each sample: bytes are or are not arriving (two different indicators, see below) |
+| Epoch age | `ntrip.epoch_age_sec` in each sample, and `epoch_age_sec` in the `ntrip_substate` event and in an `ntrip_end` with reason `stale_backlog` |
+| Receiver correction age | `fix.correction_age_sec` in each sample (GGA field 13) |
+
+The two receive indicators measure different events and are not interchangeable.
+`rtcm.valid_frame_age_ms` (the recorder's `CorrectionProbe`) is the time since
+the last complete RTCM frame whose CRC was valid. `ntrip.flow.rx_age_ms` (the
+`NtripClient`) is the time since the last chunk of bytes was received from the
+caster, whatever it contained. Partial, malformed, or non-RTCM traffic can keep
+`rx_age_ms` near zero while `valid_frame_age_ms` grows. The arrival age of
+[technical.md](technical.md#correction-ages) (`RtcmCounter`) is a third stamp:
+it is taken when the message number of a frame has been recognised, before the
+frame is complete and without a CRC check, so it can be fresher than
+`valid_frame_age_ms`.
+
+`ntrip.epoch_age_sec` is `null` before the first plausible MSM epoch of a
+connection, while the device clock is invalid, and after the epoch cache has
+expired; `null` is not stale. Read the three together: an arrival age near zero
+with a large epoch age is a caster that replays a backlog, which is what the
+`stale_backlog` reconnect (`ntrip_reconnect_on_stale_sec`, off by default)
+answers.
+
+`ntrip.substate` is `stale` while the epoch age exceeds
+`ntrip_max_epoch_age_sec` (15 s by default) and `null` otherwise. The
+`ntrip_substate` event records each change while a stream is running. The
+recorder does not write an event when the substate is cleared by the stream
+itself, so the rule for a reader is: **a stream boundary or an `ntrip_end`
+means substate `null`**. After an `ntrip_end` (any reason, `stale_backlog`
+included), after a failed connection, and at the start of the next stream,
+treat the substate as `null` until a new `ntrip_substate` event says `stale`,
+even if the last such event before the boundary said `stale`; the samples
+taken after the boundary show the true value. The
+epoch age depends on the device clock; see
+[known-limitations.md](known-limitations.md), *The epoch age drifts with the
+device clock*.
 
 Mark a fixed action just before performing it. A browser connected over Wi-Fi
 cannot mark an action on the receiver while it is disconnected.
@@ -117,7 +187,8 @@ queued GSV/GSA sentences and then yields, storing compact observations instead
 of raw sentences. Samples are buffered in RAM and flushed nominally every 30
 seconds; `start`, `stop`, a resumed `boot`, and a marker are flushed
 immediately. Flash operations and other tasks can delay the cadence;
-`sample_gap_ms`, the drop counters, and `max_write_ms` expose those limits.
+`sample_gap_ms`, `loop_lag_max_ms`, the drop counters, and `max_write_ms`
+expose those limits.
 
 A power interruption can lose the pending interval and events and leave an
 incomplete last line. Recovery starts a new segment and never appends to that

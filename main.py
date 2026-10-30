@@ -1,6 +1,56 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Entry point: watchdog, GC, supervision and task start. MicroPython runs this file at launch. It deliberately holds little logic of its own - it lies in cfg, state, net, web, ble and gnss.
 """
+
+
+def _move_stakeout_root(old="stakeout", new="stakeout.sets"):
+    """Move the stakeout folder of an older firmware to its new name.
+
+    It runs before the first import: MicroPython imports a folder "stakeout" before
+    stakeout.py (see stakeout.DEFAULT_ROOT, which new equals), so the old folder
+    would replace the module and stop the start. It never deletes or merges:
+    when new exists too, old goes to the first free old + ".conflict-<n>"
+    (n = 1..9) for inspection by hand, so the start proceeds with new. A file
+    named old is no folder of sets and stays. cfg is imported only to log.
+    """
+    import os
+    try:
+        if not os.stat(old)[0] & 0x4000:
+            return
+    except OSError:
+        return
+    target, sev = new, "INFO"
+    try:
+        os.stat(new)
+        target = None
+        for n in range(1, 10):
+            name = "%s.conflict-%d" % (old, n)
+            try:
+                os.stat(name)
+            except OSError:
+                target, sev = name, "WARN"
+                break
+    except OSError:
+        pass
+    if target is None:
+        sev, text = "ERROR", "Both %s/ and %s/ exist and no conflict name is free." % (old, new)
+    else:
+        try:
+            os.rename(old, target)
+            text = ("Stakeout sets moved from %s/ to %s/." % (old, new) if sev == "INFO" else
+                    "%s/ exists; the old %s/ was moved to %s/ unchanged." % (new, old, target))
+        except OSError as exc:
+            sev, text = "ERROR", "Stakeout folder %s/ could not be moved: %s" % (old, exc)
+    try:
+        from cfg import log
+        log(sev, "SYS", text)
+    except Exception:
+        print(sev, text)
+
+
+_move_stakeout_root()
+del _move_stakeout_root
+
 import gc
 import machine
 import micropython
@@ -22,17 +72,20 @@ from cfg import (CONFIG, FACTORY_RESET_HOLD_MS, FACTORY_RESET_PIN,
                  bump_boot_count, save_flight_recorder, previous_flight_recorder,
                  log, log_boot, mark_planned_reset, reset_boot_count,
                  reset_cause_name, safe_mode_active, button_held,
-                 factory_reset)
+                 factory_reset, set_task_reloader)
 from fanout import NmeaSenderTask, nmea_tcp_task
 from field_diagnostics import recorder as field_recorder
 from esptel import EspTelemetryTask
 from discovery import discovery_task
-from gnss import GNSSHandler, StatusLED, send_command
+from gnss import GNSSHandler, StatusLED
 from net import NetworkManager, NtripClient
 from state import (SimpleQueue, _instances, app, shutdown_event,
                    stale_heartbeat, supervise)
 from tracking import tracker
-from web import http_server_task
+import events
+import stakeout
+import stakeout_session
+from web import http_server_task, recording_active, ui_live_snapshot
 from parallel_benchmark import prepare as prepare_parallel_benchmark, producer as parallel_producer
 
 
@@ -90,6 +143,22 @@ async def gc_task():
         gc.collect()
         log("DEBUG", "GC", "Free RAM: %d Bytes" % gc.mem_free())
     log("INFO", "SYS", "GC task stopped.")
+
+LOOP_LAG_TICK_MS = 100
+
+async def loop_lag_task():
+    """Measure event-loop lag: how far a 100 ms sleep overshoots its tick.
+
+    Reports the overshoot to app.note_loop_lag() (stats loop_lag_ms/loop_lag_max_ms and
+    the field recorder's per-sample window). A stall is attributed to the sample in
+    which the ticker first runs after it. No heartbeat, no log, no allocation per tick.
+    """
+    last = time.ticks_ms()
+    while not shutdown_event.is_set():
+        await asyncio.sleep_ms(LOOP_LAG_TICK_MS)
+        now = time.ticks_ms()
+        app.note_loop_lag(time.ticks_diff(now, last) - LOOP_LAG_TICK_MS)
+        last = now
 
 # ---------------------------------------------------------------------------
 # GRACEFUL SHUTDOWN TASK
@@ -157,12 +226,19 @@ async def tracking_startup_task():
     started = time.ticks_ms()
     app.stats["tracking_startup"] = {"state": "loading"}
     try:
-        await tracker.initialize_async()
+        # Project deletions a restart interrupted are settled before the
+        # survey counts as loaded.
+        await tracker.initialize_async(stakeout.store.reconcile_deletions)
         parallel_tracker, parallel_config = prepare_parallel_benchmark(tracker)
     except Exception as error:
         # Keep access available, but do not expose a partly recovered survey.
         tracker._loaded = False
-        app.stats["tracking_startup"] = {"state": "error"}
+        # A specific code where the tracker knows the case (a restore that
+        # stops every start-up), so /status names it without the log.
+        reason = tracker.startup_error or {"code": "survey_recovery_failed",
+                                           "message": str(error)}
+        app.stats["tracking_startup"] = {"state": "error", "code": reason["code"],
+                                         "message": reason["message"]}
         log("ERROR", "TRACK", "Survey recovery failed: %s" % error)
         while not shutdown_event.is_set():
             app.beat("tracking")
@@ -170,6 +246,8 @@ async def tracking_startup_task():
         return
     elapsed = time.ticks_diff(time.ticks_ms(), started)
     app.stats["tracking_startup"] = {"state": "ready", "duration_ms": elapsed}
+    # Interrupted restores and unreferenced point-store files repaired at boot.
+    app.stats["storage_recovery"] = dict(tracker.storage_recovery)
     log("INFO", "TRACK", "Survey storage ready: %d points in %d ms." %
         (tracker.feature_count(), elapsed))
     tasks = [asyncio.create_task(tracker.run_worker())]
@@ -234,6 +312,10 @@ async def main():
     except (OSError, ValueError) as error:
         log("ERROR", "DIAG", "Field recorder initialization failed: %s" % error)
 
+    # net.py asks this before a Wi-Fi scan or NTP; registered for safe mode as well.
+    app.set_recording_probe(recording_active)
+    app.set_fix_listener(stakeout_session.session.on_fix)
+
     if safe:
         # The device couldn't go beyond SAFE_MODE_UPTIME_SEC.
         log("ERROR", "SYS", "Safe mode: %d consecutive boots did not reach %ds uptime. "
@@ -242,12 +324,16 @@ async def main():
         app.log_error("SYS", "Safe mode after %d boot attempts." % boots)
         gc.collect()
         network_manager = NetworkManager()
+        # Registered as in normal operation: the Wi-Fi scan is needed most in safe mode.
+        _instances["network"] = network_manager
         tasks = [
             asyncio.create_task(supervise("field_diagnostics", field_recorder.run)),
             asyncio.create_task(supervise("watchdog", watchdog_task)),
             asyncio.create_task(supervise("gc", gc_task)),
+            asyncio.create_task(supervise("loop_lag", loop_lag_task)),  # diagnostics only, not in WATCHED_TASKS
             asyncio.create_task(supervise("network", network_manager.run)),
             asyncio.create_task(supervise("http", http_server_task)),
+            asyncio.create_task(supervise("sse", lambda: events.hub.run(ui_live_snapshot, app.fix_version))),  # not in WATCHED_TASKS
             asyncio.create_task(supervise("discovery", discovery_task)),
         ]
         await asyncio.gather(*tasks)
@@ -275,10 +361,12 @@ async def main():
 
     # Write accesses to the BLE-RX characteristic go to the receiver as a verified
     # command, and without this assignment, RX is ineffective.
-    ble_mgr.command_sink = lambda sentence: send_command(gnss.uart, sentence)
+    ble_mgr.command_sink = gnss.tx.submit
 
-    ntrip = NtripClient(gnss.uart)
+    ntrip = NtripClient(gnss.tx)
     _instances["ntrip"] = ntrip
+    # A saved caster change reaches the running client without a restart (#23).
+    set_task_reloader(ntrip.reload)
     ble_sender = NmeaSenderTask(ble_mgr, nmea_queue)
     telemetry = EspTelemetryTask(nmea_queue, ntrip)
 
@@ -290,10 +378,12 @@ async def main():
         asyncio.create_task(shutdown_handler(ble_mgr, gnss)),
         asyncio.create_task(supervise("watchdog", watchdog_task)),
         asyncio.create_task(supervise("gc", gc_task)),
+        asyncio.create_task(supervise("loop_lag", loop_lag_task)),  # diagnostics only, not in WATCHED_TASKS
         asyncio.create_task(supervise("led", StatusLED().run)),
         asyncio.create_task(supervise("network", network_manager.run)),
         asyncio.create_task(supervise("ntrip", ntrip.run)),
         asyncio.create_task(supervise("http", http_server_task)),
+        asyncio.create_task(supervise("sse", lambda: events.hub.run(ui_live_snapshot, app.fix_version))),  # not in WATCHED_TASKS
         asyncio.create_task(supervise("discovery", discovery_task)),
         asyncio.create_task(supervise("gnss", gnss.run)),
         asyncio.create_task(supervise("ble", ble_sender.run)),

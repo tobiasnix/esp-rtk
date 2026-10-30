@@ -2,11 +2,125 @@
 """Regression coverage for every UI term reported during the V11 audit."""
 import json
 import os
+import re
 import subprocess
 import unittest
 
 
 ROOT = os.path.dirname(os.path.dirname(__file__))
+
+
+REGEX_PREFIX = set("(,=:[!&|?{};+-*%<>~^")
+JS_KEYWORDS = {"return", "typeof", "case", "in", "of", "else", "do", "void", "delete"}
+# Mixed-case product and reference-frame names that must stay untranslated.
+# Acronym-only tokens (RTK FIXED, GPS FIX, H/V values, unit lines) carry no prose and are
+# skipped by the candidate rule itself.
+ALLOWED_UNTRANSLATED = {
+    "Quectel LC29H",     # receiver module name
+    "ETRS89 (ReNEP)",    # reference frame example in a placeholder
+    "Bluetooth LE",      # protocol name on the access card
+}
+
+
+# Units and abbreviations that read the same in every language.
+UNITS = {"MHz", "MiB", "dBm", "min", "sat"}
+
+
+def js_literals(source):
+    """Return the text of every string and template literal; ${...} becomes {x}.
+
+    Template expressions are scanned recursively, so literals nested in them count too.
+    """
+    found = []
+    size = len(source)
+
+    def read_string(index, quote):
+        end = index + 1
+        while end < size and source[end] != quote:
+            end += 2 if source[end] == "\\" else 1
+        return source[index + 1:end], end + 1
+
+    def read_template(index):
+        end, parts = index + 1, []
+        while end < size and source[end] != "`":
+            if source[end] == "\\":
+                parts.append(source[end:end + 2])
+                end += 2
+            elif source.startswith("${", end):
+                depth, cursor = 1, end + 2
+                while cursor < size and depth:
+                    char = source[cursor]
+                    if char in "\"'":
+                        cursor = read_string(cursor, char)[1]
+                        continue
+                    if char == "`":
+                        cursor = read_template(cursor)[1]
+                        continue
+                    depth += (char == "{") - (char == "}")
+                    cursor += 1
+                found.extend(js_literals(source[end + 2:cursor - 1]))
+                parts.append("{x}")
+                end = cursor
+            else:
+                parts.append(source[end])
+                end += 1
+        return "".join(parts), end + 1
+
+    index, last = 0, ""
+    while index < size:
+        char = source[index]
+        if source.startswith("//", index):
+            newline = source.find("\n", index)
+            index = size if newline < 0 else newline
+        elif source.startswith("/*", index):
+            index = source.find("*/", index) + 2
+        elif char in "\"'":
+            value, index = read_string(index, char)
+            found.append(value)
+            last = "s"
+        elif char == "`":
+            value, index = read_template(index)
+            found.append(value)
+            last = "s"
+        elif char == "/" and (last in REGEX_PREFIX or last in ("", "kw")):
+            end, in_class = index + 1, False
+            while end < size and (in_class or source[end] != "/"):
+                if source[end] == "\\":
+                    end += 1
+                elif source[end] == "[":
+                    in_class = True
+                elif source[end] == "]":
+                    in_class = False
+                end += 1
+            index = end + 1
+            while index < size and source[index].isalpha():
+                index += 1
+            last = "r"
+        elif char.isalnum() or char in "_$":
+            end = index
+            while end < size and (source[end].isalnum() or source[end] in "_$"):
+                end += 1
+            last = "kw" if source[index:end] in JS_KEYWORDS else "w"
+            index = end
+        else:
+            if not char.isspace():
+                last = char
+            index += 1
+    return found
+
+
+def is_ui_prose(value):
+    """A literal a person reads: a phrase with at least one lowercase word."""
+    text = re.sub(r"\{\w*\}", "", value)
+    if " " not in value or not re.search("[A-Za-z]", text):
+        return False
+    # A template may open with a value, e.g. "{x} task restarts"; plain text opens with a capital or digit.
+    if not re.match(r"(?:\{x\}\s*)+\S|[A-Z0-9]", value):
+        return False
+    if re.match(r"^[.#\[]", value) or re.search("[=<>]", value) or re.match(r"^\w+/\w+$", value):
+        return False
+    words = re.findall("[A-Za-z]{3,}", text)
+    return any(re.search("[a-z]", word) and word not in UNITS for word in words)
 
 
 class TestI18nCoverage(unittest.TestCase):
@@ -66,6 +180,79 @@ class TestI18nCoverage(unittest.TestCase):
         english = self.dictionaries["en"]
         for key, fragment in expected.items():
             self.assertIn(fragment, english[key], key)
+
+    def test_app_translation_keys_exist_in_both_languages(self):
+        with open(os.path.join(ROOT, "app.js"), encoding="utf-8") as source:
+            app_source = source.read()
+        keys = set(re.findall(r'\btr\(\s*"([^"]+)"', app_source))
+        # "quality." and "asset." are prefixes completed at run time.
+        keys = {key for key in keys if not key.endswith(".")}
+        self.assertGreater(len(keys), 40)
+        for language in ("en", "de"):
+            missing = sorted(key for key in keys if key not in self.dictionaries[language])
+            self.assertEqual(missing, [], language)
+
+    def test_reverse_lookup_literals_kept_their_translation(self):
+        # These literals were translated only by the removed reverse dictionary lookup
+        # (English value -> key -> German value; the last key wins on duplicates).
+        literals = (
+            "unknown", "label", "Vertical accuracy", "Satellites", "Cancel",
+            "Optimize recording storage", "Download", "e.g. Field road east",
+            "Rename project", "Delete project", "Device functions", "Stream key",
+            "Rotate stream key", "Send", "Restart is being prepared \u2026",
+            "Device is offline \u2014 waiting for it to return \u2026",
+            "Restart successful \u2014 connection restored.",
+            "The device is still restarting. Check Wi-Fi and reload when its network returns.",
+            "Direct web portal", "ground", "Search log", "GNSS module",
+            # Found while checking the app in German: reverse hits beyond the planned 22.
+            "Encrypted pairing", "NMEA over TCP", "Web portal",
+        )
+        self.assertEqual(len(literals), 25)
+        script = "const i=require('./i18n.js');console.log(JSON.stringify(i.v2de));"
+        v2de = json.loads(subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True, text=True,
+            check=True).stdout)
+        english, german = self.dictionaries["en"], self.dictionaries["de"]
+        for literal in literals:
+            keys = [key for key, value in english.items() if value == literal]
+            self.assertTrue(keys, literal)
+            self.assertEqual(v2de.get(literal), german[keys[-1]], literal)
+
+    def test_app_ui_literals_have_german_text(self):
+        with open(os.path.join(ROOT, "app.js"), encoding="utf-8") as source:
+            app_source = source.read()
+        # tr("key", "fallback") pairs are translated through the dictionaries.
+        app_source = re.sub(
+            r'\btr\(\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:"(?:[^"\\]|\\.)*"|`[^`]*`)', "tr(", app_source)
+        script = "console.log(JSON.stringify(require('./i18n.js').v2de));"
+        v2de = json.loads(subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True, text=True,
+            check=True).stdout)
+        shape = lambda value: re.sub(r"\{\w*\}", "{}", value)
+        known = {shape(key) for key in v2de}
+        candidates = {
+            literal.replace("\\u2026", "\u2026").replace('\\"', '"')
+            for literal in js_literals(app_source)}
+        missing = sorted(
+            value for value in candidates
+            if is_ui_prose(value) and value not in ALLOWED_UNTRANSLATED
+            and shape(value) not in known)
+        self.assertLessEqual(len(ALLOWED_UNTRANSLATED), 15)
+        self.assertEqual(missing, [], "UI literals without a German text")
+
+    def test_quantity_forms_have_german_text(self):
+        # The pattern only sees quantity(...) calls whose forms sit on one source line.
+        with open(os.path.join(ROOT, "app.js"), encoding="utf-8") as source:
+            app_source = source.read()
+        forms = set()
+        for one, many in re.findall(r'quantity\([^\n]*?,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', app_source):
+            forms.update((one, many))
+        script = "console.log(JSON.stringify(require('./i18n.js').v2de));"
+        v2de = json.loads(subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True, text=True,
+            check=True).stdout)
+        self.assertGreater(len(forms), 10)
+        self.assertEqual(sorted(form for form in forms if form not in v2de), [])
 
     def test_dynamic_whole_paragraphs_are_marked(self):
         with open(os.path.join(ROOT, "web.py"), encoding="utf-8") as source:

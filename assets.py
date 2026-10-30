@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Single cache-busting version for every browser asset."""
 
-ASSET_VERSION = "15.8.1"
+ASSET_VERSION = "16.0.0"
 
 
 def version_html(value):

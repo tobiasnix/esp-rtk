@@ -252,35 +252,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class TestStatusToken(unittest.TestCase):
-    def setUp(self):
-        self.saved = dict(cfg.CONFIG)
-
-    def tearDown(self):
-        cfg.CONFIG.clear()
-        cfg.CONFIG.update(self.saved)
-
-    def test_without_tokens_status_is_open(self):
-        cfg.CONFIG["status_token"] = ""
-        self.assertTrue(web._token_ok(""))
-        self.assertTrue(web._token_ok("token=egal"))
-
-    def test_with_tokens_it_is_required(self):
-        cfg.CONFIG["status_token"] = "s3cret"
-        self.assertFalse(web._token_ok(""))
-        self.assertFalse(web._token_ok("token=wrong"))
-        self.assertTrue(web._token_ok("token=s3cret"))
-
-    def test_the_token_may_be_url_coded(self):
-        cfg.CONFIG["status_token"] = "a b"
-        self.assertTrue(web._token_ok("token=a+b"))
-        self.assertTrue(web._token_ok("token=a%20b"))
-
-    def test_other_parameters_do_not_interfere(self):
-        cfg.CONFIG["status_token"] = "s3cret"
-        self.assertTrue(web._token_ok("x=1&token=s3cret&y=2"))
-
-
 class TestSubnet(unittest.TestCase):
     def test_prefix(self):
         self.assertEqual(cfg._subnet_prefix("192.168.4.1"), "192.168.4.")

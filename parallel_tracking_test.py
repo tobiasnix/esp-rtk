@@ -125,9 +125,19 @@ def verify_export(raw, target):
         ids.add(value)
         return value
 
+    schema = [None]
+
     def coordinate(value):
-        if (not isinstance(value, list) or len(value) != 3 or
-                any(type(item) not in (int, float) or not math.isfinite(item) for item in value) or
+        if not isinstance(value, list) or len(value) != 3:
+            raise ValueError("Invalid exported coordinate.")
+        if schema[0] == 5:
+            # Schema 5: exact integers in 1e-8 degrees and millimetres.
+            if (any(type(item) is not int for item in value) or
+                    not -18000000000 <= value[0] <= 18000000000 or
+                    not -9000000000 <= value[1] <= 9000000000 or
+                    not -20000000 <= value[2] <= 100000000):
+                raise ValueError("Invalid exported coordinate.")
+        elif (any(type(item) not in (int, float) or not math.isfinite(item) for item in value) or
                 not -180 <= value[0] <= 180 or not -90 <= value[1] <= 90 or
                 not -20000 <= value[2] <= 100000):
             raise ValueError("Invalid exported coordinate.")
@@ -169,9 +179,10 @@ def verify_export(raw, target):
         if kind == "header":
             if (records or value.get("kind") != "survey_backup" or
                     type(value.get("schema_version")) is not int or
-                    value["schema_version"] not in (2, 3, 4) or
+                    value["schema_version"] not in (2, 3, 4, 5) or
                     not isinstance(value.get("profiles", []), list)):
                 raise ValueError("Invalid export header.")
+            schema[0] = value["schema_version"]
             for profile in value.get("profiles", []):
                 if (not isinstance(profile, dict) or not isinstance(profile.get("id"), str) or
                         not profile["id"] or profile["id"] in profiles or

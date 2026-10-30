@@ -106,7 +106,7 @@ class TestParallelBenchmark(unittest.TestCase):
         production = Tracker(os.path.join(self.tmp.name, "production"))
         tracker, config = benchmark.prepare(production)
         self.assertEqual(config["target_points"], 20000)
-        self.assertEqual(tracker._feature_limit(), 20000)
+        self.assertEqual(tracker.feature_limit(), 20000)
         self.assertEqual(tracker.feature_count(), 0)
         self.assertTrue(tracker.active_line_id)
         tracker.add_vertex(benchmark._synthetic_fix(1), source="automatic")
@@ -241,6 +241,27 @@ class TestParallelBenchmark(unittest.TestCase):
         self.assertFalse(result["qualification_valid"])
         self.assertEqual(benchmark.app.stats["parallel_benchmark_state"], "runtime_errors")
 
+    def test_a_refused_synthetic_fix_counts_one_tracking_queue_overflow(self):
+        self.write_config()
+        tracker, config = benchmark.prepare(Tracker(os.path.join(self.tmp.name, "production")))
+        stop = asyncio.Event()
+
+        async def end_first_round(delay):
+            stop.set()
+
+        stats = benchmark.app.stats
+        overflows = stats.get("tracking_queue_overflows", 0)
+        generated = stats.get("parallel_benchmark_generated", 0)
+        with mock.patch.object(benchmark, "shutdown_event", stop), \
+                mock.patch.object(benchmark, "_services_live", return_value=True), \
+                mock.patch.object(benchmark, "_gate_state", return_value="complete"), \
+                mock.patch.object(benchmark.asyncio, "sleep_ms", end_first_round), \
+                mock.patch.object(benchmark, "_write_result"), \
+                mock.patch.object(tracker, "enqueue_fix", return_value=None):
+            asyncio.run(benchmark.producer(tracker, config))
+        self.assertEqual(stats["tracking_queue_overflows"], overflows + 1)
+        self.assertEqual(stats["parallel_benchmark_generated"], generated + 1)
+
     def test_manual_ble_reconnect_has_time_without_starting_partial_load(self):
         self.write_config()
         tracker, config = benchmark.prepare(Tracker(os.path.join(self.tmp.name, "production")))
@@ -315,6 +336,15 @@ class TestWifiBenchmarkControl(unittest.TestCase):
         benchmark.control("start", self.production, 10000)
         with self.assertRaises(ValueError):
             benchmark.control("start", self.production, 10000)
+
+    def test_start_without_flash_reserve_is_a_storage_reserve_error(self):
+        low = {"free_flash_bytes": 100, "required_flash_reserve_bytes": 100,
+               "estimated_temporary_bytes": 1, "writable": False}
+        with mock.patch.object(self.production, "storage_capacity", return_value=low):
+            with self.assertRaisesRegex(tracking.StorageReserveError,
+                                        "Insufficient flash reserve for the benchmark."):
+                benchmark.control("start", self.production, 10000)
+        self.assertIsNone(benchmark.load_config())
 
     def test_stop_disables_resume_without_deleting_test_data(self):
         benchmark.control("start", self.production, 10000)

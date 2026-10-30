@@ -5,6 +5,10 @@ const {chromium} = require('playwright');
 (async () => {
   const server = http.createServer((req, res) => {
     if (req.url === '/') return res.end('<html></html>');
+    if (req.url === '/forbidden') {
+      res.writeHead(403, {'Content-Type':'application/json'});
+      return res.end('{"error":"csrf_rejected","message":"x"}');
+    }
     if (req.url === '/body') {
       res.writeHead(200, {'Content-Type':'application/json'}); res.flushHeaders();
     }
@@ -17,8 +21,9 @@ const {chromium} = require('playwright');
     const page = await browser.newPage();
     await page.goto('http://127.0.0.1:' + server.address().port + '/');
     const source = fs.readFileSync('app.js', 'utf8');
-    await page.addScriptTag({content:source.slice(source.indexOf('let csrfToken='),
-      source.indexOf('\nconst roots=')) + '\nglobalThis.probeAPI=api;'});
+    await page.addScriptTag({content:'const tr=(key,fallback)=>fallback;\n' +
+      source.slice(source.indexOf('let csrfToken='),
+      source.indexOf('\nconst MEASURE_ROUTE=')) + '\nglobalThis.probeAPI=api;'});
     const results = await page.evaluate(async () => {
       const outcomes = [];
       for (const [path, routeSignal] of [['/headers',false],['/headers',true],['/body',true]]) {
@@ -36,9 +41,13 @@ const {chromium} = require('playwright');
       setTimeout(() => controller.abort(),20);
       outcomes.push(await cancelled);
       outcomes.push(JSON.stringify(await independent));
+      try { await probeAPI.json('/forbidden'); outcomes.push('completed'); }
+      catch (error) { outcomes.push(error.name); }
+      outcomes.push(location.pathname === '/');
       return outcomes;
     });
-    assert.deepStrictEqual(results,['TimeoutError','TimeoutError','TimeoutError',true,true,'AbortError','{}']);
+    assert.deepStrictEqual(results,['TimeoutError','TimeoutError','TimeoutError',true,true,'AbortError','{}',
+      'ForbiddenError',true]);
     console.log('PASS: header/body deadlines, navigation cancellation, independent and shared requests');
   } finally { await browser.close(); await new Promise(resolve => server.close(resolve)); }
 })().catch(error => {console.error(error);process.exitCode=1;});

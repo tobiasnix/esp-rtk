@@ -2,6 +2,7 @@
 """Cold line summaries must stay cooperative after an ordinary undo."""
 import asyncio
 import copy
+import datetime
 import json
 import os
 import tempfile
@@ -14,6 +15,8 @@ import tracking
 
 
 FIX = {"lat": 50.0, "lon": 8.0, "alt": 123.4, "qual": 4,
+       "lat_e8": 5000000000, "lon_e8": 800000000, "alt_mm": 123400,
+       "geoid_sep_mm": 45600,
        "fix_status_text": "RTK_FIXED", "sats": 24, "hdop": 0.6,
        "correction_age_sec": 0.5, "station_id": "0054",
        "receiver_accuracy": {"source": "NMEA_GST", "semi_major_sigma_m": 0.02,
@@ -42,18 +45,19 @@ class TestTrackingSummaryReadLoad(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(tracker._sync_journal, True)
         tracker.create_project("Cold summary")
         line = tracker.start_line("Route", 0.2, recording_mode="route")
-        previous_lon = FIX["lon"]
+        previous_lon_e8 = FIX["lon_e8"]
         for index in range(129):
-            lon = FIX["lon"] + index * 0.00002
+            lon_e8 = FIX["lon_e8"] + index * 2000
             if index % 11 == 0:
-                lon += 0.0001
+                lon_e8 += 10000
             if index % 7 == 0 and index:
-                lon = previous_lon
-            fix = dict(FIX, lon=lon, alt=FIX["alt"] + (index % 3) * 0.8)
+                lon_e8 = previous_lon_e8
+            fix = dict(FIX, lon=lon_e8 / 1e8, lon_e8=lon_e8, alt=FIX["alt"] + (index % 3) * 0.8,
+                       alt_mm=FIX["alt_mm"] + (index % 3) * 800)
             if index % 13 == 0:
                 fix.update(qual=1, fix_status_text="GPS_FIX", receiver_accuracy=None)
             tracker.add_vertex(fix, "automatic")
-            previous_lon = lon
+            previous_lon_e8 = lon_e8
         tracker.undo_last()
         self.assertNotIn("_summary", line)
         self.assertEqual(len(line["coordinates"]), 128)
@@ -62,7 +66,7 @@ class TestTrackingSummaryReadLoad(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def reference_summary(line, coordinates, measurements):
         gaps = [tracking._distance_m(a, b) for a, b in zip(coordinates, coordinates[1:])]
-        steps = [abs(b[2] - a[2]) for a, b in zip(coordinates, coordinates[1:])]
+        steps = [abs(b[2] - a[2]) / 1000 for a, b in zip(coordinates, coordinates[1:])]
         length = sum(gaps)
         warnings = []
         if len(coordinates) < 2: warnings.append("not_enough_line_points")
@@ -84,6 +88,8 @@ class TestTrackingSummaryReadLoad(unittest.IsolatedAsyncioTestCase):
             "large_vertical_step_count": sum(
                 step > tracking.MAX_VERTICAL_STEP_M for step in steps),
             "max_vertical_step_m": round(max(steps, default=0.0), 3),
+            "legacy_vertex_count": sum(
+                item.get("precision") == "legacy_float32" for item in measurements),
             "finish_diagnostics": line.get("finish_diagnostics")}
 
     def reference_detail(self, tracker, line, coordinates, measurements, offset, limit):
@@ -100,11 +106,16 @@ class TestTrackingSummaryReadLoad(unittest.IsolatedAsyncioTestCase):
             vertex = {"number": index + 1, "coordinate": coordinate,
                 "segment_length_m": round(tracking._distance_m(previous, coordinate), 3)
                     if previous else None,
-                "vertical_step_m": round(coordinate[2] - previous[2], 3)
+                "vertical_step_m": round((coordinate[2] - previous[2]) / 1000, 3)
                     if previous else None, "quality": quality}
             vertex.update((key, value.get(key)) for key in (
-                "source", "fix_status", "satellites", "hdop", "correction_age_sec",
-                "receiver_accuracy", "accuracy_observation"))
+                "precision", "source", "fix_status", "satellites", "hdop",
+                "correction_age_sec", "receiver_accuracy", "accuracy_observation"))
+            # recorded_at counts seconds since 2000-01-01T00:00:00Z; derived independently.
+            stamp = datetime.datetime(2000, 1, 1, tzinfo=datetime.timezone.utc) + \
+                datetime.timedelta(seconds=value["recorded_at"])
+            vertex.update(recorded_at_utc=stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                          clock_unsynced=not 2024 <= stamp.year <= 2099)
             vertices.append(vertex)
         result.update(vertices=vertices, vertex_offset=offset,
                       vertices_returned=len(vertices), has_more_vertices=end < len(coordinates))
@@ -120,7 +131,7 @@ class TestTrackingSummaryReadLoad(unittest.IsolatedAsyncioTestCase):
                     "revision": tracker._event_sequence, "lines": [{
                         "id": line["id"], "name": line["name"], "state": line["state"],
                         "vertex_count": 128, "length_m": summary["length_m"],
-                        "coordinates": coordinates[::2][-50:]}], "points": [], "truncated": True}
+                        "coordinates": coordinates[::2][-50:]}], "points": [], "profiles": {}, "truncated": True}
                 query = "limit=50"
             else:
                 expected = self.reference_detail(tracker, line, coordinates, measurements, 78, 50)
@@ -194,7 +205,7 @@ class TestTrackingSummaryReadLoad(unittest.IsolatedAsyncioTestCase):
         expected = self.reference_summary(line, coordinates, measurements)
         stream = tracker._iter_line_summary(line)
         self.assertIsNone(next(stream))
-        tracker.add_vertex(dict(FIX, lon=8.01), "automatic")
+        tracker.add_vertex(dict(FIX, lon=8.01, lon_e8=801000000), "automatic")
         current = tracker._line_summary(line)
         current_cache = dict(line["_summary"])
         self.assertEqual(list(stream)[-1], expected)
@@ -220,7 +231,7 @@ class TestTrackingSummaryReadLoad(unittest.IsolatedAsyncioTestCase):
 
     async def test_append_after_undo_retains_complete_rebuilt_quality_summary(self):
         tracker, line = self.make_undone_line("undo-append")
-        tracker.add_vertex(dict(FIX, lon=8.01), "automatic")
+        tracker.add_vertex(dict(FIX, lon=8.01, lon_e8=801000000), "automatic")
         coordinates, measurements = list(line["coordinates"]), list(line["measurements"])
         expected = self.reference_summary(line, coordinates, measurements)
         # Check the cache immediately: a later read must not hide a bad rebuild.
@@ -229,7 +240,7 @@ class TestTrackingSummaryReadLoad(unittest.IsolatedAsyncioTestCase):
                          expected["quality_accepted_count"])
         self.assertAlmostEqual(line["_summary"]["length_m"], expected["length_m"], places=3)
         self.assertEqual(tracker._line_summary(line), expected)
-        tracker.add_vertex(dict(FIX, lon=8.01002), "automatic")
+        tracker.add_vertex(dict(FIX, lon=8.01002, lon_e8=801002000), "automatic")
         expected = self.reference_summary(line, list(line["coordinates"]),
                                           list(line["measurements"]))
         self.assertEqual(tracker._line_summary(line), expected)

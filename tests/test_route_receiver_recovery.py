@@ -11,6 +11,13 @@ import tracking
 from test_gnss_startup import position
 
 
+def exact(fix):
+    """Add the exact integer fields the tracker stores to a float-only position."""
+    fix.update(lat_e8=round(fix["lat"] * 100000000), lon_e8=round(fix["lon"] * 100000000),
+               alt_mm=round(fix["alt"] * 1000))
+    return fix
+
+
 GGA = sentence("GNGGA,120010.000,5000.000,N,00800.000,E,4,18,0.7,100.0,M,40.0,M,1.0,0054")
 GST = sentence("GNGST,120010.000,0.01,0.02,0.01,0,0.01,0.01,0.02")
 
@@ -34,7 +41,7 @@ class TestRouteRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.tracker.enqueue_fix(fix))
         self.assertFalse(self.tracker.enqueue_fix(dict(fix,
             receiver_accuracy=self.handler.parse_gst(GST))))
-        self.assertEqual(len(self.tracker._pending_fixes), 1)
+        self.assertEqual(self.tracker.pending_count(), 1)
         self.tracker.add_vertex(self.tracker._pending_fixes.pop(), source="automatic")
         self.tracker._sync_journal(close=True)
         restored = tracking.Tracker(self.path)
@@ -50,7 +57,8 @@ class TestRouteRecovery(unittest.IsolatedAsyncioTestCase):
                 now, stop = [100000], asyncio.Event()
                 fix = self.handler.parse_gga(GGA)
                 # A second position must clear the configured minimum distance.
-                fix.update(utc="with-gst" if attach else "without-gst", lon=8 if attach else 8.001)
+                fix.update(utc="with-gst" if attach else "without-gst", lon=8 if attach else 8.001,
+                           lon_e8=800000000 if attach else 800100000)
                 saved, waits = [], []
                 original_add = self.tracker.add_vertex
 
@@ -107,14 +115,16 @@ class TestRouteRecovery(unittest.IsolatedAsyncioTestCase):
                         mock.patch.object(gnss, "log"), \
                         mock.patch.dict(gnss.CONFIG, {"fix_update_interval_ms": 0}):
                     await asyncio.wait_for(handler.run(), 2)
-                self.assertEqual(len(self.tracker._pending_fixes), 1)
+                self.assertEqual(self.tracker.pending_count(), 1)
                 queued = self.tracker._pending_fixes[0]
                 self.assertTrue(tracking.quality_check(queued)["accepted"])
                 self.assertEqual(self.app.stats["gst_output_state"], "receiving")
                 self.assertEqual(self.app.stats["crc_errors"], 0)
+                self.assertEqual(self.app.stats["gga_parsed"], 1)
+                self.assertEqual(self.app.stats["gnss_msgs"], self.app.stats["gga_parsed"])
 
     def test_two_power_cycles_preserve_route_and_block_cold_start_points(self):
-        self.tracker.add_vertex(position(0), source="automatic")
+        self.tracker.add_vertex(exact(position(0)), source="automatic")
         for cycle in range(2):
             self.tracker._sync_journal(close=True)
             self.tracker = tracking.Tracker(self.path)
@@ -123,7 +133,7 @@ class TestRouteRecovery(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(line["state"], "recording")
             guard = gnss.RouteStartupGuard()
             for second in range(5):
-                fix = position(second, lat=50.002 if second < 3 else 50.004)
+                fix = exact(position(second, lat=50.002 if second < 3 else 50.004))
                 fix["route_ready"] = guard.check(fix, second * 1000, False)
                 self.assertFalse(self.tracker.enqueue_fix(fix))
                 self.assertFalse(self.tracker.on_fix(fix))
@@ -131,11 +141,11 @@ class TestRouteRecovery(unittest.IsolatedAsyncioTestCase):
                     self.tracker.add_vertex(fix, source="automatic")
             self.assertEqual(len(line["coordinates"]), before)
             for second in range(11):
-                fix = position(second, lon=8 + .001 * (cycle + 1))
+                fix = exact(position(second, lon=8 + .001 * (cycle + 1)))
                 fix["route_ready"] = guard.check(fix, 5000 + second * 1000, True)
                 self.assertEqual(self.tracker.on_fix(fix), second == 10)
             self.assertEqual(len(line["coordinates"]), before + 1)
-            self.assertTrue(all(coordinate[1] == 50 for coordinate in line["coordinates"]))
+            self.assertTrue(all(coordinate[1] == 5000000000 for coordinate in line["coordinates"]))
         self.assertEqual(len(line["coordinates"]), 3)
         orders = [measurement["record_order"] for measurement in line["measurements"]]
         self.assertEqual(orders, sorted(set(orders)))
