@@ -723,9 +723,10 @@ out.de = [dict.de["ui.restore_done"], dict.de["ui.restore_done_plain"]];
                           ("ui.optimizing_storage", "Optimizing recording storage \u2026"),
                           ("ui.optimize_done", "Recording storage optimized")):
             values = re.findall(r'"%s": "([^"]+)"' % re.escape(key), I18N_JS)
-            self.assertEqual(len(values), 2, key)
+            self.assertEqual(len(values), 3, key)
             self.assertEqual(values[0], text)
             self.assertNotEqual(values[0], values[1], key)
+            self.assertNotEqual(values[0], values[2], key)
 
     def test_restore_and_optimize_report_through_the_maintenance_wrapper(self):
         # #21c: both actions run under maintenanceAction (own key, no capture lock) and no longer write to the pill.
@@ -948,9 +949,10 @@ eq("k old tag after restore", [r.result, r.calls.length], [{state: "unclear"}, 1
               "ui.capture_cancelled": "Measurement cancelled"}
         for key, english in en.items():
             values = re.findall(r'"%s": "([^"]+)"' % re.escape(key), I18N_JS)
-            self.assertEqual(len(values), 2, key)
+            self.assertEqual(len(values), 3, key)
             self.assertEqual(values[0], english, key)
             self.assertNotEqual(values[1], english, key)
+            self.assertNotEqual(values[2], english, key)
             self.assertIn('tr("%s","%s"' % (key, english), APP_JS)
 
     def test_v2_restart_button_uses_explicit_translation_key(self):
@@ -978,10 +980,11 @@ eq("k old tag after restore", [r.result, r.calls.length], [{state: "unclear"}, 1
         english = "Configuration saved and in effect; no restart needed."
         self.assertIn("summary.restart_required===false", APP_JS)
         self.assertIn(english, APP_JS)
-        # The German text lives only in i18n.js; tests read it from there.
+        # The translated texts live only in i18n.js; tests read them from there.
         values = re.findall(r'"%s": "([^"]+)"' % re.escape(english), I18N_JS)
-        self.assertEqual(len(values), 1)
-        self.assertNotEqual(values[0], english)
+        self.assertEqual(len(values), 2)
+        for translated in values:
+            self.assertNotEqual(translated, english)
 
     def test_configuration_form_states_its_constraints(self):
         # Source pins; the browser cases A1-A13 (tests/guided_apply_acceptance.js) prove the behaviour.
@@ -991,7 +994,7 @@ eq("k old tag after restore", [r.result, r.calls.length], [{state: "unclear"}, 1
                          'class:"unsaved-marker"', "staging_revision=", 'tr("ui.network_format_help"'):
             self.assertIn(contract, APP_JS)
         for key, english in (("ui.guided_check_changes", "Check changes"), ("ui.guided_unsaved", "Unsaved changes")):
-            self.assertEqual(len(re.findall(r'"%s": "' % key, I18N_JS)), 2, key)
+            self.assertEqual(len(re.findall(r'"%s": "' % key, I18N_JS)), 3, key)
             self.assertIn('"%s": "%s"' % (key, english), I18N_JS)
         # The blanket input listener of src/99-boot.js is gone; the form computes its own dirty state.
         self.assertNotIn('if(form)form.dataset.dirty="true";', APP_JS)
@@ -1319,9 +1322,9 @@ console.log(JSON.stringify({
         # app.js is generated from src/; the shipped bundle must carry the same text.
         self.assertIn(json.dumps(spa_restore), APP_JS)
         self.assertNotIn(json.dumps(old_spa), APP_JS)
-        # English value in the dictionary plus the v2de key for the SPA.
+        # English value in the dictionary plus the reverse-map keys for the SPA (DE and PL).
         self.assertEqual(I18N_JS.count(
-            "Backups from older firmware contain only Wi-Fi and NTRIP settings"), 2)
+            "Backups from older firmware contain only Wi-Fi and NTRIP settings"), 3)
         script = ("const i=require('./i18n.js');i.setLanguage('en');const en=i.t('ui.confirm_restore_detail');"
                   "i.setLanguage('de');const de=i.t('ui.confirm_restore_detail');"
                   "console.log(JSON.stringify({en,de,spa:i.v2de[%s],old:i.v2de[%s]||null}));"
@@ -2501,9 +2504,10 @@ console.log(JSON.stringify(out));
         for key, english in (("ui.field_setup_unavailable", "Field setup could not be loaded."),
                              ("ui.vertical_ground", "ground"), ("ui.vertical_phase_centre", "phase centre")):
             values = re.findall(r'"%s": "([^"]+)"' % re.escape(key), I18N_JS)
-            self.assertEqual(len(values), 2, key)
+            self.assertEqual(len(values), 3, key)
             self.assertEqual(values[0], english)
             self.assertNotEqual(values[0], values[1], key)
+            self.assertNotEqual(values[0], values[2], key)
 
     def test_lazy_qr_module_uses_the_asset_version(self):
         self.assertIn('data-asset-version="%s"' % assets.ASSET_VERSION, ui.APP_V2)

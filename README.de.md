@@ -33,10 +33,11 @@ der englischen Dokumentation, beginnend mit [README.md](README.md).
    aufgelöst, stattdessen die aktuelle IP-Adresse verwenden.
 
 Das Portal arbeitet lokal und ohne Cloud. Es verwendet HTTP, nicht HTTPS.
-Deutsch wird bei einem deutschsprachigen Browser automatisch gewählt; die
-Sprache lässt sich im Portal umstellen. Unter **Gerät → Bedienung & Anzeige**
-lässt sich die Darstellung wählen: Automatisch (folgt Smartphone oder
-Computer), Hell, Dunkel oder Hoher Kontrast. Auf den Seiten Messen und Gerät
+Deutsch oder Polnisch wird bei einem deutsch- bzw. polnischsprachigen Browser
+automatisch gewählt, sonst Englisch; die Sprache lässt sich im Portal
+umstellen. Unter **Gerät → Bedienung & Anzeige** lässt sich die Darstellung
+wählen: Automatisch (folgt Smartphone oder Computer), Hell, Dunkel oder Hoher
+Kontrast. Auf den Seiten Messen und Gerät
 kommen die Live-Daten über einen ständig offenen Datenstrom statt durch
 wiederholte Abfragen.
 

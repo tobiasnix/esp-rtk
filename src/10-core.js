@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 const tr=(key,fallback,values)=>{if(!globalThis.RtkI18n)return fallback;const translated=globalThis.RtkI18n.t(key,values);return translated===key?fallback:translated;};
 const V2_DE=globalThis.RtkI18n&&RtkI18n.v2de||{};
-function localText(value){const source=value==null?"":String(value);return globalThis.RtkI18n&&RtkI18n.getLanguage()==="de"&&V2_DE[source]||source;}
+function localText(value){const source=value==null?"":String(value),i=globalThis.RtkI18n;if(i&&i.localize)return i.localize(source);if(i&&i.v2de&&i.getLanguage&&i.getLanguage()==="de")return i.v2de[source]||source;return typeof V2_DE!=="undefined"&&V2_DE[source]||source;}
 const text=value=>document.createTextNode(localText(value));
 // User data (names, notes, SSIDs, log lines) is shown verbatim: never run it through the dictionary.
 const raw=value=>document.createTextNode(value==null?"":String(value));
 function h(tag,attrs,...children){const node=document.createElement(tag);Object.entries(attrs||{}).forEach(([key,value])=>{if(value==null||(value===false&&!key.startsWith("aria-")))return;if(key==="class")node.className=value;else if(key==="text")node.textContent=localText(value);else if(key==="textRaw")node.textContent=value==null?"":String(value);else if(key.startsWith("on"))node.addEventListener(key.slice(2),value);else if(key in node&&key!=="form")node[key]=value;else node.setAttribute(key,value===true&&!key.startsWith("aria-")?"":String(value));});children.flat(Infinity).forEach(child=>node.append(child instanceof Node?child:text(child)));return node;}
 const replace=(target,...children)=>target.replaceChildren(...children.flat(Infinity));
 // Measurement numbers follow the language (decimal mark); one formatter per language and digit count.
-const fmt=((cache)=>(value,digits=2)=>{if(value==null)return"—";const locale=globalThis.RtkI18n&&RtkI18n.getLanguage()==="de"?"de-DE":"en-US",key=locale+digits;return(cache[key]||(cache[key]=new Intl.NumberFormat(locale,{minimumFractionDigits:digits,maximumFractionDigits:digits,useGrouping:false}))).format(Number(value));})({});
+const fmt=((cache)=>(value,digits=2)=>{if(value==null)return"—";const language=globalThis.RtkI18n?RtkI18n.getLanguage():"en",locale=({de:"de-DE",pl:"pl-PL"})[language]||"en-US",key=locale+digits;return(cache[key]||(cache[key]=new Intl.NumberFormat(locale,{minimumFractionDigits:digits,maximumFractionDigits:digits,useGrouping:false}))).format(Number(value));})({});
 // Exact, locale independent decimals for the position line.
 const fixedText=(value,digits=2)=>value==null?"—":Number(value).toFixed(digits);
 function e8Text(value){const negative=value<0,digits=String(Math.abs(value)).padStart(9,"0");return`${negative?"-":""}${digits.slice(0,-8)}.${digits.slice(-8)}`;}
@@ -31,7 +31,7 @@ function routeStartupLabel(live){
 }
 const duration=value=>{let seconds=Math.max(0,Math.floor(Number(value)||0)),hours=Math.floor(seconds/3600);seconds%=3600;const minutes=Math.floor(seconds/60);return hours?`${hours} h ${minutes} min`:`${minutes} min ${seconds%60} s`;};
 const formatClock=value=>{const seconds=Math.max(0,Math.floor(Number(value)||0));return`${String(Math.floor(seconds/60)).padStart(2,"0")}:${String(seconds%60).padStart(2,"0")}`;};
-const quantity=(count,one,many)=>`${count} ${localText(Number(count)===1?one:many)}`;
+const quantity=(count,one,many)=>`${count} ${globalThis.RtkI18n&&RtkI18n.getLanguage&&RtkI18n.getLanguage()==="pl"&&RtkI18n.plural?RtkI18n.plural(one,many,count):localText(Number(count)===1?one:many)}`;
 const when=(timestamp,clock)=>{if(!timestamp)return"—";const age=Math.max(0,Number(clock)-Number(timestamp));if(age<60)return tr("ui.just_now","just now");if(age<3600)return tr("ui.minutes_ago",`${Math.floor(age/60)} min ago`,{count:Math.floor(age/60)});const date=new Date(Date.now()-age*1000);return globalThis.RtkI18n?RtkI18n.formatDateTime(date):date.toLocaleString();};
 // The measurement method is a device value (#24-UI); drop the old browser-local copy once.
 try{localStorage.removeItem("rtk-samples");}catch(_){}

@@ -137,9 +137,9 @@ class TestI18nCoverage(unittest.TestCase):
         cls.dictionaries = json.loads(result.stdout)
 
     def test_languages_have_identical_keys(self):
-        self.assertEqual(
-            set(self.dictionaries["en"]), set(self.dictionaries["de"])
-        )
+        english = set(self.dictionaries["en"])
+        for language in ("de", "pl"):
+            self.assertEqual(english, set(self.dictionaries[language]), language)
 
     def test_reported_terms_have_english_translations(self):
         expected = {
@@ -188,7 +188,7 @@ class TestI18nCoverage(unittest.TestCase):
         # "quality." and "asset." are prefixes completed at run time.
         keys = {key for key in keys if not key.endswith(".")}
         self.assertGreater(len(keys), 40)
-        for language in ("en", "de"):
+        for language in ("en", "de", "pl"):
             missing = sorted(key for key in keys if key not in self.dictionaries[language])
             self.assertEqual(missing, [], language)
 
@@ -218,41 +218,44 @@ class TestI18nCoverage(unittest.TestCase):
             self.assertTrue(keys, literal)
             self.assertEqual(v2de.get(literal), german[keys[-1]], literal)
 
-    def test_app_ui_literals_have_german_text(self):
+    def test_app_ui_literals_have_german_and_polish_text(self):
         with open(os.path.join(ROOT, "app.js"), encoding="utf-8") as source:
             app_source = source.read()
         # tr("key", "fallback") pairs are translated through the dictionaries.
         app_source = re.sub(
             r'\btr\(\s*"(?:[^"\\]|\\.)*"\s*,\s*(?:"(?:[^"\\]|\\.)*"|`[^`]*`)', "tr(", app_source)
-        script = "console.log(JSON.stringify(require('./i18n.js').v2de));"
-        v2de = json.loads(subprocess.run(
+        script = ("const i=require('./i18n.js');"
+                  "console.log(JSON.stringify({de:i.v2de,pl:i.v2pl}));")
+        maps = json.loads(subprocess.run(
             ["node", "-e", script], cwd=ROOT, capture_output=True, text=True,
             check=True).stdout)
         shape = lambda value: re.sub(r"\{\w*\}", "{}", value)
-        known = {shape(key) for key in v2de}
         candidates = {
             literal.replace("\\u2026", "\u2026").replace('\\"', '"')
             for literal in js_literals(app_source)}
-        missing = sorted(
-            value for value in candidates
-            if is_ui_prose(value) and value not in ALLOWED_UNTRANSLATED
-            and shape(value) not in known)
+        prose = sorted(value for value in candidates
+                       if is_ui_prose(value) and value not in ALLOWED_UNTRANSLATED)
+        for language, label in (("de", "German"), ("pl", "Polish")):
+            known = {shape(key) for key in maps[language]}
+            missing = sorted(value for value in prose if shape(value) not in known)
+            self.assertEqual(missing, [], "UI literals without a %s text" % label)
         self.assertLessEqual(len(ALLOWED_UNTRANSLATED), 15)
-        self.assertEqual(missing, [], "UI literals without a German text")
 
-    def test_quantity_forms_have_german_text(self):
+    def test_quantity_forms_have_german_and_polish_text(self):
         # The pattern only sees quantity(...) calls whose forms sit on one source line.
         with open(os.path.join(ROOT, "app.js"), encoding="utf-8") as source:
             app_source = source.read()
         forms = set()
         for one, many in re.findall(r'quantity\([^\n]*?,\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', app_source):
             forms.update((one, many))
-        script = "console.log(JSON.stringify(require('./i18n.js').v2de));"
-        v2de = json.loads(subprocess.run(
+        script = ("const i=require('./i18n.js');"
+                  "console.log(JSON.stringify({de:i.v2de,pl:i.v2pl}));")
+        maps = json.loads(subprocess.run(
             ["node", "-e", script], cwd=ROOT, capture_output=True, text=True,
             check=True).stdout)
         self.assertGreater(len(forms), 10)
-        self.assertEqual(sorted(form for form in forms if form not in v2de), [])
+        for language in ("de", "pl"):
+            self.assertEqual(sorted(form for form in forms if form not in maps[language]), [], language)
 
     def test_dynamic_whole_paragraphs_are_marked(self):
         with open(os.path.join(ROOT, "web.py"), encoding="utf-8") as source:
@@ -262,19 +265,20 @@ class TestI18nCoverage(unittest.TestCase):
         ):
             self.assertIn('data-i18n="%s"' % key, source)
 
-    def test_german_time_uses_24_hour_clock(self):
-        script = (
-            "const i=require('./i18n.js');"
-            "i.setLanguage('de');"
-            "console.log(i.formatTime(new Date('2026-08-25T17:04:05Z')));"
-        )
-        result = subprocess.run(
-            ["node", "-e", script], cwd=ROOT, capture_output=True,
-            text=True, check=True,
-        )
-        rendered = result.stdout.strip()
-        self.assertIn("17", rendered)
-        self.assertNotRegex(rendered.lower(), r"\b(am|pm)\b")
+    def test_german_and_polish_time_use_24_hour_clock(self):
+        for language in ("de", "pl"):
+            script = (
+                "const i=require('./i18n.js');"
+                "i.setLanguage(process.argv[1]);"
+                "console.log(i.formatTime(new Date('2026-08-25T17:04:05Z')));"
+            )
+            result = subprocess.run(
+                ["node", "-e", script, language], cwd=ROOT, capture_output=True,
+                text=True, check=True, env={**os.environ, "TZ": "UTC"},
+            )
+            rendered = result.stdout.strip()
+            self.assertIn("17", rendered)
+            self.assertNotRegex(rendered.lower(), r"\b(am|pm)\b")
 
     def test_explicit_keys_can_switch_languages(self):
         script = r"""
@@ -316,6 +320,41 @@ console.log(JSON.stringify({english,german,labels}));
                     "ui.ntrip_caster", "ui.device_label_access",
                     "ui.direct_portal_detail", "ui.bluetooth_pairing_detail"):
             self.assertIn('data-i18n="%s"' % key, source)
+
+    def test_polish_reverse_map_covers_the_german_literals(self):
+        script = ("const i=require('./i18n.js');"
+                  "console.log(JSON.stringify({de:i.v2de,pl:i.v2pl}));")
+        maps = json.loads(subprocess.run(
+            ["node", "-e", script], cwd=ROOT, capture_output=True, text=True,
+            check=True).stdout)
+        self.assertEqual(sorted(maps["de"]), sorted(maps["pl"]))
+        shape = lambda value: sorted(re.findall(r"\{\w+\}", value))
+        for source, translated in maps["pl"].items():
+            self.assertTrue(translated.strip(), source)
+            self.assertEqual(shape(source), shape(translated), source)
+
+    def test_polish_uses_three_plural_forms(self):
+        script = r"""
+const i=require('./i18n.js');
+i.setLanguage('pl');
+console.log(JSON.stringify([1,2,5,12,22].map(n => i.plural('point','points',n))));
+"""
+        result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                                capture_output=True, text=True, check=True)
+        self.assertEqual(json.loads(result.stdout),
+                         ["punkt", "punkty", "punktów", "punktów", "punkty"])
+
+    def test_polish_is_detected_and_offered_in_the_selector(self):
+        script = r"""
+Object.defineProperty(globalThis, "navigator", {value: {language: "pl-PL"}, configurable: true});
+const i=require('./i18n.js');
+console.log(JSON.stringify({language: i.getLanguage(), selector: i.selector()}));
+"""
+        result = subprocess.run(["node", "-e", script], cwd=ROOT,
+                                capture_output=True, text=True, check=True)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["language"], "pl")
+        self.assertIn('data-language="pl"', payload["selector"])
 
     def test_status_renderers_translate_labels_explicitly(self):
         for filename in ("pages.js",):

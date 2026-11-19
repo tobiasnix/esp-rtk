@@ -117,7 +117,7 @@ documentation.
 | `app.js.gz`, `app.css.gz`, `i18n.js.gz` | Pre-compressed copies of the above, rebuilt by `push.py` and served when the client accepts gzip. |
 | `pages.js`, `pages.css` | Shared behaviour and styling for the support pages: sign-in, setup, diagnostics, label. |
 | `base.css` | Base stylesheet loaded before `pages.css`. |
-| `i18n.js` | Complete German and English dictionaries for the browser; machine-readable results stay English. |
+| `i18n.js` | Complete German, English and Polish dictionaries for the browser; machine-readable results stay English. |
 | `qr.js` | Local QR code rendering for the Wi-Fi and portal codes on the label page. |
 
 ### Tasks
