@@ -185,15 +185,17 @@ class TestTranslations(unittest.TestCase):
     def test_dictionaries_match_and_interpolation_is_escaped(self):
         script = r"""
 const i=require('./i18n.js');
-const en=Object.keys(i.dictionaries.en).sort(), de=Object.keys(i.dictionaries.de).sort();
-if(JSON.stringify(en)!==JSON.stringify(de)) throw Error('dictionary mismatch');
+const en=Object.keys(i.dictionaries.en).sort(), de=Object.keys(i.dictionaries.de).sort(),
+      pl=Object.keys(i.dictionaries.pl).sort();
+if(JSON.stringify(en)!==JSON.stringify(de)) throw Error('dictionary mismatch de');
+if(JSON.stringify(en)!==JSON.stringify(pl)) throw Error('dictionary mismatch pl');
 i.setLanguage('en');
 const escaped=i.t('sample',{value:'<script>'});
-console.log(JSON.stringify({en,de,escaped}));
+console.log(JSON.stringify({en,de,pl,escaped}));
 """
         # Add the sample key equally without making the production dictionary
         # carry a test-only string: unknown keys still exercise interpolation.
-        script = script.replace("const escaped=", "i.dictionaries.en.sample='{value}'; i.dictionaries.de.sample='{value}'; const escaped=")
+        script = script.replace("const escaped=", "i.dictionaries.en.sample='{value}'; i.dictionaries.de.sample='{value}'; i.dictionaries.pl.sample='{value}'; const escaped=")
         result = subprocess.run(["node", "-e", script], cwd=REPO,
                                 text=True, capture_output=True, check=True)
         payload = json.loads(result.stdout)

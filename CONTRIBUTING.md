@@ -46,7 +46,7 @@ and web sources.
 
 User-facing text is the one exception, and it is not hardcoded into the pages.
 Every UI string goes through `i18n.js`, which holds one dictionary per
-language (currently English and German) keyed by a `namespace.name` string
+language (currently English, German and Polish) keyed by a `namespace.name` string
 such as `"action.save"`. Markup emitted by `web.py` references a string by its
 key with a `data-i18n="..."` attribute, and the current field app
 (`app.js`) looks a key up at render time with `tr("ui.some_key",

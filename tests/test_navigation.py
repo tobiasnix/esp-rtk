@@ -903,6 +903,8 @@ eq("no method or rules controls", all.some(node => /measurement-choice|field-set
 eq("connection state", connection, ["Settings ready", "ok"]);
 const group = walk(cards[1]).find(node => (node.attrs || {}).role === "group");
 eq("theme group", group && [group.attrs.class, group.attrs["aria-label"]], ["segmented theme-choice", "Appearance"]);
+eq("language buttons", walk(cards[0]).filter(node => node.tag === "button").map(node => [node.attrs.text, node.attrs["aria-pressed"]]),
+  [["Deutsch", false], ["English", true], ["Polski", false]]);
 const choices = walk(group).filter(node => node.tag === "button");
 eq("theme buttons", choices.map(node => [node.attrs["data-theme-choice"], node.attrs.text, node.attrs["aria-pressed"]]),
   [["auto", "Automatic", true], ["light", "Light", false], ["dark", "Dark", false], ["high-contrast", "High contrast", false]]);

@@ -54,7 +54,7 @@ eq("connecting", state(reasonLive([], {current_fix: rtk}), "connecting"), "unkno
             self.assertIn('tr("%s"' % key, body)
         dictionaries = test_ui.I18N_JS
         for key in ("ui.pill_gate_blocked", "ui.pill_measurement_blocked"):
-            self.assertEqual(dictionaries.count('"%s"' % key), 2, key + " in the en and de dictionaries")
+            self.assertEqual(dictionaries.count('"%s"' % key), 3, key + " in the en, de and pl dictionaries")
 
     def test_pill_label_colours_come_from_tokens(self):
         self.assertIn('.live-state b[data-gate="blocked"]{color:var(--critical)}', APP_CSS)

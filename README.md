@@ -25,10 +25,10 @@ A short German quick guide for device users is in
   CSRF token.
 - Field app organised as **Measure · Projects · Device**, with live data from
   one Server-Sent Events stream (`GET /api/events`) and a polling fallback.
-- Bilingual user interface. German is selected automatically for a German
-  browser, English otherwise, and the choice can be overridden in the portal.
-  The appearance can be Automatic (following the phone or computer), Light,
-  Dark, or High contrast.
+- Trilingual user interface. German or Polish is selected automatically for a
+  German or Polish browser, English otherwise, and the choice can be overridden
+  in the portal. The appearance can be Automatic (following the phone or
+  computer), Light, Dark, or High contrast.
 - NMEA output over Bluetooth LE (Nordic UART Service) and over TCP on port
   10110, with a compatibility listener on port 2947.
 - Measurement release with configurable thresholds: required fix type,

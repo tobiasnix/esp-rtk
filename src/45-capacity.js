@@ -26,7 +26,7 @@ class CapacityEstimate {
 }
 const capacityEstimate=new CapacityEstimate();
 let capacityWarningLevel=0;
-const capacityNumber=value=>Number(value).toLocaleString(globalThis.RtkI18n&&RtkI18n.getLanguage()==="de"?"de-DE":"en-US");
+const capacityNumber=value=>Number(value).toLocaleString(({de:"de-DE",pl:"pl-PL"})[globalThis.RtkI18n?RtkI18n.getLanguage():"en"]||"en-US");
 function capacityText(message,values={}){return localText(message).replace(/\{(\w+)\}/g,(_,key)=>values[key]??"");}
 function capacityLevel(capacity){
   if(!capacity||!Number.isFinite(capacity.used)||!(capacity.limit>0))return -1;
